@@ -1,9 +1,13 @@
+import { config } from "dotenv";
 import { getMiNA } from "@mi-gpt/miot";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as stream from "node:stream";
 import { promisify } from "node:util";
+
+// 加载环境变量
+config();
 
 const kSupportedDevices = [
   "LX06", // 小爱音箱 Pro
