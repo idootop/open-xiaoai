@@ -1,6 +1,5 @@
 // 导入子模块
 pub mod udp;    // UDP服务发现实现模块
-pub mod auth;   // 认证相关模块
 
 // 导入所需的外部依赖
 use crate::base::AppError;  // 应用错误类型
