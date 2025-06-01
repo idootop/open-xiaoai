@@ -24,3 +24,4 @@ uuid = { version = "1.15.1", features = ["v4"] }
 rand = "0.9.1"
 hmac = "0.12"
 sha2 = "0.10"
+clap = { version = "4.0", features = ["derive"] }

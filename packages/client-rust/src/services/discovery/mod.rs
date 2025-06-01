@@ -35,6 +35,6 @@ pub trait DiscoveryService {
 /// # Panics
 /// 
 /// 如果无法创建服务发现实例，此函数将会panic
-pub async fn default_discovery() -> impl DiscoveryService {
-    udp::UdpDiscoveryService::new().await.expect("Failed to create discovery service")
+pub async fn default_discovery(secret: &str) -> impl DiscoveryService {
+    udp::UdpDiscoveryService::new(secret).await.expect("Failed to create discovery service")
 }

@@ -18,9 +18,6 @@ const DISCOVERY_PORT: u16 = 5354;
 const RESPONSE_TIMEOUT: u64 = 3;
 /// 设备唯一标识符，用于在发现包中标识客户端
 const DEVICE_ID: [u8; 16] = *b"xiaoai-device-01";
-/// 共享密钥，用于生成和验证HMAC
-/// 注意：在生产环境中，应该使用更安全的方式管理密钥
-const SECRET: &[u8] = b"your-secret-key";
 
 /// UDP服务发现实现
 /// 
@@ -35,6 +32,8 @@ pub struct UdpDiscoveryService {
     /// UDP套接字，用于发送广播和接收响应
     /// 使用Arc包装以便在异步任务间共享
     socket: Arc<UdpSocket>,
+    /// HMAC认证使用的共享密钥
+    secret: String,
 }
 
 impl UdpDiscoveryService {
@@ -50,14 +49,15 @@ impl UdpDiscoveryService {
     /// # 错误
     /// 
     /// 如果无法绑定UDP套接字或设置广播选项，将返回错误
-    pub async fn new() -> Result<Self, AppError> {
+    pub async fn new(secret: &str) -> Result<Self, AppError> {
         // 绑定到所有网络接口的随机端口
         let socket = UdpSocket::bind("0.0.0.0:0").await?;
         // 启用广播功能
         socket.set_broadcast(true)?;
         
         Ok(Self {
-            socket: Arc::new(socket)
+            socket: Arc::new(socket),
+            secret: secret.to_string(),
         })
     }
 
@@ -91,7 +91,7 @@ impl UdpDiscoveryService {
             .as_secs();
         
         // 创建HMAC实例并使用共享密钥初始化
-        let mut mac = HmacSha256::new_from_slice(SECRET)?;
+        let mut mac = HmacSha256::new_from_slice(self.secret.as_bytes())?;
         // 依次添加设备ID、随机数和时间戳到HMAC计算中
         mac.update(&DEVICE_ID);
         mac.update(&nonce.to_be_bytes());
