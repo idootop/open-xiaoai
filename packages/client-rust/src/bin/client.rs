@@ -16,6 +16,8 @@ use open_xiaoai::services::connect::rpc::RPC;
 use open_xiaoai::services::monitor::instruction::InstructionMonitor;
 use open_xiaoai::services::monitor::playing::PlayingMonitor;
 
+use open_xiaoai::services::discovery::{default_discovery, DiscoveryService};
+
 struct AppClient;
 
 impl AppClient {
@@ -25,18 +27,35 @@ impl AppClient {
     }
 
     pub async fn run() {
-        let url = std::env::args().nth(1).expect("❌ 请输入服务器地址");
-        println!("✅ 已启动");
+        let discovery = default_discovery().await;
+        println!("✅ 已启动 - 正在发现服务端...");
+        
         loop {
+            // 发现服务端
+            let addr = match discovery.discover().await {
+                Ok(addr) => addr,
+                Err(e) => {
+                    eprintln!("❌ 发现服务端失败: {}, 1秒后重试", e);
+                    sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
+            
+            let url = format!("ws://{}", addr);
+            println!("🔍 发现服务端: {}, 正在连接...", addr);
+            
             let Ok(ws_stream) = AppClient::connect(&url).await else {
                 sleep(Duration::from_secs(1)).await;
                 continue;
             };
-            println!("✅ 已连接: {:?}", url);
+            
+            println!("✅ 已连接: {}", url);
             AppClient::init(ws_stream).await;
+            
             if let Err(e) = MessageManager::instance().process_messages().await {
                 eprintln!("❌ 消息处理异常: {}", e);
             }
+            
             AppClient::dispose().await;
             eprintln!("❌ 已断开连接");
         }
