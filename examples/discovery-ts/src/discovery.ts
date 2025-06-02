@@ -58,34 +58,21 @@ export class DiscoveryService {
   }
 
   private validatePacket(data: Buffer): boolean {
-    // Packet structure: [deviceId:16][nonce:4][timestamp:8][hmac:32]
-    if (data.length !== 60) return false;
+    // Packet structure: [deviceId:16][nonce:4][timestamp:8] (28 bytes)
+    // Note: HMAC is not sent in request, client will verify it in response
+    if (data.length !== 28) return false;
 
-    const deviceId = data.subarray(0, 16);
-    const nonce = data.subarray(16, 20);
     const timestamp = data.readBigUInt64BE(20);
-    const receivedHmac = data.subarray(28, 60);
-
     // Time window validation (±30 seconds)
     const currentTime = BigInt(Math.floor(Date.now() / 1000));
-    if (currentTime - timestamp > 30n || timestamp - currentTime > 30n) {
-      return false;
-    }
-
-    // Calculate HMAC
-    const hmac = crypto.createHmac('sha256', this.secret);
-    hmac.update(deviceId);
-    hmac.update(nonce);
-    hmac.update(data.subarray(20, 28)); // timestamp bytes
-
-    const calculatedHmac = hmac.digest();
-    return crypto.timingSafeEqual(calculatedHmac, receivedHmac);
+    return !(currentTime - timestamp > 30n || timestamp - currentTime > 30n);
   }
 
   private createResponse(request: Buffer): Buffer {
-    // Response structure: [first 32 bytes of request][ip:4][wsPort:2]
-    const response = Buffer.alloc(38);
-    request.copy(response, 0, 0, 32);
+    // Response structure: [request:28][ip:4][wsPort:2][hmac:32] (66 bytes)
+    // Server must prove knowledge of key, client has final verification control
+    const response = Buffer.alloc(66);
+    request.copy(response, 0, 0, 28);
 
     // Add server IP address (4 bytes)
     const interfaces = os.networkInterfaces();
@@ -98,13 +85,20 @@ export class DiscoveryService {
     }
 
     const ipParts = addresses[0]!.address.split('.').map(Number);
-    response.writeUInt8(ipParts[0], 32);
-    response.writeUInt8(ipParts[1], 33);
-    response.writeUInt8(ipParts[2], 34);
-    response.writeUInt8(ipParts[3], 35);
+    response.writeUInt8(ipParts[0], 28);
+    response.writeUInt8(ipParts[1], 29);
+    response.writeUInt8(ipParts[2], 30);
+    response.writeUInt8(ipParts[3], 31);
 
     // Add WebSocket port (2 bytes, big-endian)
-    response.writeUInt16BE(this.wsPort, 36);
+    response.writeUInt16BE(this.wsPort, 32);
+
+    // Calculate HMAC for response
+    const hmac = crypto.createHmac('sha256', this.secret);
+    hmac.update(request.subarray(0, 28)); // deviceId + nonce + timestamp
+    hmac.update(response.subarray(28, 34)); // ip + port
+    const calculatedHmac = hmac.digest();
+    calculatedHmac.copy(response, 34);
 
     return response;
   }

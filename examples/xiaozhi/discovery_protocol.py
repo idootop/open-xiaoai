@@ -72,7 +72,7 @@ class DiscoveryService:
     
     def _validate_packet(self, data: bytes) -> bool:
         """
-        验证发现请求包
+        验证发现请求包(28字节)
         
         Args:
             data: 接收到的数据包
@@ -80,50 +80,43 @@ class DiscoveryService:
         Returns:
             bool: 是否是有效的请求包
         """
-        # 包结构: [设备ID:16字节][随机数:4字节][时间戳:8字节][HMAC:32字节]
-        if len(data) != 60:
+        # 包结构: [设备ID:16字节][随机数:4字节][时间戳:8字节]
+        # 注意: HMAC签名不会在请求时发送，由客户端在验证响应时计算
+        if len(data) != 28:
             return False
             
-        device_id = data[:16]
-        nonce = data[16:20]
         timestamp = struct.unpack('>Q', data[20:28])[0]
-        received_hmac = data[28:60]
         
         # 时间窗口验证 (±30秒)
         current_time = time.time()
-        if abs(current_time - timestamp) > 30:
-            return False
-            
-        # 计算HMAC
-        h = hmac.new(self.secret, digestmod=hashlib.sha256)
-        h.update(device_id)
-        h.update(nonce)
-        h.update(struct.pack('>Q', timestamp))
-        calculated_hmac = h.digest()
-        
-        # 比较HMAC
-        return hmac.compare_digest(calculated_hmac, received_hmac)
+        return abs(current_time - timestamp) <= 30
     
     def _create_response(self, request: bytes) -> bytes:
         """
-        创建发现响应包
+        创建发现响应包(66字节)
         
         Args:
-            request: 原始请求包
+            request: 原始请求包(28字节)
             
         Returns:
-            bytes: 响应数据包
+            bytes: 响应数据包(66字节)
         """
-        # 响应结构: [原始请求前32字节][IP地址:4字节][WebSocket端口:2字节]
-        response = request[:32]
+        # 响应结构: [原始请求28字节][IP地址:4字节][WebSocket端口:2字节][HMAC:32字节]
+        # 服务端必须证明知道密钥，客户端掌握最终验证权
+        response = request[:28]
         
         # 添加当前服务器IP地址 (4字节)
         host_ip = socket.gethostbyname(socket.gethostname())
         ip_parts = [int(part) for part in host_ip.split('.')]
-        print(ip_parts)
         response += struct.pack('>BBBB', *ip_parts)
         
         # 添加WebSocket端口 (2字节, big-endian)
         response += struct.pack('>H', self.ws_port)
+        
+        # 计算HMAC签名
+        h = hmac.new(self.secret, digestmod=hashlib.sha256)
+        h.update(request[:28])  # 设备ID + 随机数 + 时间戳
+        h.update(response[28:34])  # IP + 端口
+        response += h.digest()
         
         return response

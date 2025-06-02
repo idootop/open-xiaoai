@@ -24,10 +24,10 @@ const DEVICE_ID: [u8; 16] = *b"xiaoai-device-01";
 /// 该结构体实现了通过UDP广播进行服务发现的功能。
 /// 它使用HMAC-SHA256进行消息认证，确保只有合法的服务器才能被发现。
 /// 工作流程：
-/// 1. 创建一个带有设备ID、随机数和时间戳的发现包
-/// 2. 使用共享密钥计算HMAC
-/// 3. 将发现包通过UDP广播发送到网络
-/// 4. 等待并解析服务器响应
+/// 1. 创建一个带有设备ID、随机数和时间戳的发现包(28字节)
+/// 2. 将发现包通过UDP广播发送到网络
+/// 3. 等待服务器响应(66字节)
+/// 4. 验证服务器响应中的HMAC签名
 pub struct UdpDiscoveryService {
     /// UDP套接字，用于发送广播和接收响应
     /// 使用Arc包装以便在异步任务间共享
@@ -67,13 +67,12 @@ impl UdpDiscoveryService {
     /// - 设备ID (16字节)
     /// - 随机数 (4字节) - 防止重放攻击
     /// - 时间戳 (8字节) - 提供时效性验证
-    /// - HMAC-SHA256 (32字节) - 确保数据完整性和真实性
-    /// 
+    ///
     /// 数据包格式：
-    /// +----------------+-------------+---------------+-----------------+
-    /// |   设备ID       |   随机数    |    时间戳      |      HMAC      |
-    /// | (16 bytes)    | (4 bytes)   |  (8 bytes)    |   (32 bytes)   |
-    /// +----------------+-------------+---------------+-----------------+
+    /// +----------------+-------------+---------------+
+    /// |   设备ID       |   随机数    |    时间戳      |
+    /// | (16 bytes)    | (4 bytes)   |  (8 bytes)    |
+    /// +----------------+-------------+---------------+
     /// 
     /// # 返回值
     /// 
@@ -89,35 +88,25 @@ impl UdpDiscoveryService {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)?
             .as_secs();
-        
-        // 创建HMAC实例并使用共享密钥初始化
-        let mut mac = HmacSha256::new_from_slice(self.secret.as_bytes())?;
-        // 依次添加设备ID、随机数和时间戳到HMAC计算中
-        mac.update(&DEVICE_ID);
-        mac.update(&nonce.to_be_bytes());
-        mac.update(&timestamp.to_be_bytes());
-        // 完成HMAC计算并获取结果
-        let hmac = mac.finalize().into_bytes();
 
         // 创建数据包，预分配足够的容量
-        let mut packet = Vec::with_capacity(60); // 16+4+8+32=60字节
+        let mut packet = Vec::with_capacity(28); // 16+4+8=28字节
         // 按顺序添加各个字段
         packet.extend_from_slice(&DEVICE_ID);           // 16字节
         packet.extend_from_slice(&nonce.to_be_bytes()); // 4字节
         packet.extend_from_slice(&timestamp.to_be_bytes()); // 8字节
-        packet.extend_from_slice(&hmac);                // 32字节
 
         Ok(packet)
     }
 
     /// 解析服务器响应数据包
     /// 
-    /// 该方法从服务器响应中提取服务器的IP地址和端口号。
-    /// 响应数据包格式（前32字节与请求相同，后面附加服务器地址信息）：
-    /// +----------------+-------------+---------------+-----------------+---------------+-------------+
-    /// |   设备ID       |   随机数    |    时间戳      |      HMAC      |    IP地址     |    端口     |
-    /// | (16 bytes)    | (4 bytes)   |  (8 bytes)    |   (32 bytes)   |   (4 bytes)   |  (2 bytes)  |
-    /// +----------------+-------------+---------------+-----------------+---------------+-------------+
+    /// 该方法从服务器响应中提取服务器的IP地址和端口号并验证HMAC签名。
+    /// 响应数据包格式：
+    /// +----------------+-------------+---------------+---------------+-------------+-----------------+
+    /// |   设备ID       |   随机数    |    时间戳      |    IP地址     |    端口     |      HMAC      |
+    /// | (16 bytes)    | (4 bytes)   |  (8 bytes)    |   (4 bytes)   |  (2 bytes)  |   (32 bytes)   |
+    /// +----------------+-------------+---------------+---------------+-------------+-----------------+
     /// 
     /// # 参数
     /// 
@@ -131,15 +120,24 @@ impl UdpDiscoveryService {
     /// 
     /// 如果响应长度不足或格式不正确，将返回错误
     fn parse_response(&self, response: &[u8]) -> Result<SocketAddr, AppError> {
-        // 检查响应长度是否足够包含IP地址和端口（至少需要38字节）
-        if response.len() < 38 { // 32(原始请求) + 4(IP) + 2(端口) = 38
+        // 检查响应长度是否足够包含IP地址、端口和HMAC（至少需要66字节）
+        if response.len() < 66 { // 28(原始请求) + 4(IP) + 2(端口) + 32(HMAC) = 66
             return Err("Invalid response length".into());
         }
 
+        // 验证服务端HMAC签名
+        let mut mac = HmacSha256::new_from_slice(self.secret.as_bytes())?;
+        mac.update(&response[..34]); // 原始请求(28) + IP(4) + port(2)
+        let calculated_hmac = mac.finalize().into_bytes();
+        
+        if !calculated_hmac[..].eq(&response[34..66]) {
+            return Err("Invalid HMAC in response".into());
+        }
+
         // 从响应中提取IP地址（4字节）
-        let ip = Ipv4Addr::new(response[32], response[33], response[34], response[35]);
+        let ip = Ipv4Addr::new(response[28], response[29], response[30], response[31]);
         // 从响应中提取端口号（2字节，大端序）
-        let port = u16::from_be_bytes([response[36], response[37]]);
+        let port = u16::from_be_bytes([response[32], response[33]]);
         
         // 打印解析结果
         println!("🔍 解析服务端地址: IP={}, Port={}", ip, port);
@@ -223,7 +221,7 @@ impl DiscoveryService for UdpDiscoveryService {
                             let response = &buf[..size];
                             // 验证响应的前32字节是否与请求匹配（设备ID+随机数+时间戳）
                             // 这确保响应是针对我们的请求的
-                            if response.starts_with(&packet[..32]) {
+                            if response.starts_with(&packet) {
                                 // 解析响应并返回服务器地址
                                 return self.parse_response(response);
                             }
