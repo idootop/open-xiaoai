@@ -7,7 +7,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use local_ip_address::local_ip;
 
 const PACKET_SIZE: usize = 28;
-const RESPONSE_SIZE: usize = 66; // This constant is not used, but kept for consistency with the original Python code.
 const TIME_WINDOW_SECONDS: u64 = 30;
 
 pub struct DiscoveryService {
@@ -44,7 +43,7 @@ impl DiscoveryService {
         let ws_port = self.ws_port;
 
         tokio::spawn(async move {
-            let mut buf = vec![0u8; 1024];
+            let mut buf: Vec<u8> = vec![0u8; 1024];
             while running.load(Ordering::SeqCst) {
                 match socket.recv_from(&mut buf).await {
                     Ok((len, addr)) => {
@@ -80,41 +79,50 @@ impl DiscoveryService {
     }
 
     fn validate_packet(data: &[u8]) -> bool {
+        // 检查数据包长度是否符合预期
         if data.len() != PACKET_SIZE {
             return false;
         }
 
+        // 从数据包中读取时间戳
         let timestamp = BigEndian::read_u64(&data[20..28]);
+        // 获取当前时间（自UNIX纪元以来的秒数）
         let current_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .expect("时间回溯")
+            .expect("系统时间在UNIX纪元之前") // 更具体的错误信息
             .as_secs();
 
+        // 检查时间戳是否在允许的时间窗口内
         current_time.abs_diff(timestamp) <= TIME_WINDOW_SECONDS
     }
 
     fn create_response(secret: &[u8], ws_port: u16, request: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+        // 初始化响应，复制请求的前PACKET_SIZE字节
         let mut response = request[..PACKET_SIZE].to_vec();
 
+        // 获取本地IPv4地址并添加到响应中
         let my_local_ip = local_ip()?;
         if let std::net::IpAddr::V4(ipv4) = my_local_ip {
             response.extend_from_slice(&ipv4.octets());
         } else {
+            // 如果无法获取IPv4地址，则返回错误
             return Err("无法获取IPv4地址".into());
         }
 
+        // 将WebSocket端口转换为字节并添加到响应中
         let mut ws_port_bytes = [0u8; 2];
         BigEndian::write_u16(&mut ws_port_bytes, ws_port);
         response.extend_from_slice(&ws_port_bytes);
 
+        // 使用HMAC-SHA256计算签名
         type HmacSha256 = Hmac<Sha256>;
         let mut mac = HmacSha256::new_from_slice(secret)
-            .map_err(|_| "HMAC密钥错误")?;
-        mac.update(&request[..PACKET_SIZE]);
-        mac.update(&response[PACKET_SIZE..PACKET_SIZE + 6]); // IP + 端口
+            .map_err(|_| "HMAC密钥初始化失败")?; // 更具体的错误信息
+        mac.update(&request[..PACKET_SIZE]); // 更新HMAC，包含请求数据
+        mac.update(&response[PACKET_SIZE..PACKET_SIZE + 6]); // 更新HMAC，包含IP和端口
         let result = mac.finalize();
         let signature = result.into_bytes();
-        response.extend_from_slice(&signature);
+        response.extend_from_slice(&signature); // 将签名添加到响应中
 
         Ok(response)
     }
