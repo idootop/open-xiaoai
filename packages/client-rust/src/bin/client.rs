@@ -1,3 +1,4 @@
+use clap::{Parser, ValueHint};
 use open_xiaoai::services::audio::config::AudioConfig;
 use open_xiaoai::services::monitor::kws::KwsMonitor;
 use serde_json::json;
@@ -16,6 +17,20 @@ use open_xiaoai::services::connect::rpc::RPC;
 use open_xiaoai::services::monitor::instruction::InstructionMonitor;
 use open_xiaoai::services::monitor::playing::PlayingMonitor;
 
+use open_xiaoai::services::discovery::{default_discovery, DiscoveryService};
+
+#[derive(Parser, Debug)]
+#[command(version, about)]
+struct Args {
+    /// WebSocket server URL (e.g. ws://localhost:8080)
+    #[arg(long, value_hint = ValueHint::Url)]
+    url: Option<String>,
+
+    /// Secret password for service discovery
+    #[arg(long)]
+    secret: Option<String>,
+}
+
 struct AppClient;
 
 impl AppClient {
@@ -25,21 +40,84 @@ impl AppClient {
     }
 
     pub async fn run() {
-        let url = std::env::args().nth(1).expect("❌ 请输入服务器地址");
-        println!("✅ 已启动");
-        loop {
-            let Ok(ws_stream) = AppClient::connect(&url).await else {
+        let args = Args::parse();
+
+        // 优先使用--url和--secret参数
+        let (cli_url, secret) = if args.url.is_some() || args.secret.is_some() {
+            (args.url, args.secret)
+        } else {
+            // 兼容老的参数传递方式
+            let url = std::env::args().nth(1).expect("❌ 请使用 --url 输入服务器地址，或者使用 --secret 传入服务器密码以自动发现局域网内的服务器");
+            (Some(url), None)
+        };
+
+        if let Some(url) = cli_url {
+            // 命令行地址模式
+            loop {
+                println!("🔍 使用命令行地址: {}, 正在连接...", url);
+                match AppClient::connect(&url).await {
+                    Ok(ws_stream) => {
+                        println!("✅ 已连接: {}", url);
+                        AppClient::handle_connection(ws_stream).await;
+                    }
+                    Err(e) => {
+                        eprintln!("❌ 连接失败: {}, 1秒后重试", e);
+                    }
+                }
                 sleep(Duration::from_secs(1)).await;
-                continue;
-            };
-            println!("✅ 已连接: {:?}", url);
-            AppClient::init(ws_stream).await;
-            if let Err(e) = MessageManager::instance().process_messages().await {
-                eprintln!("❌ 消息处理异常: {}", e);
             }
-            AppClient::dispose().await;
-            eprintln!("❌ 已断开连接");
+        } else {
+            // 服务发现模式
+            let secret = secret.expect("❌ 请输入服务器密码 --secret your-secret-key，以自动发现局域网内的服务器");
+            let discovery = default_discovery(&secret).await;
+            println!("🔑 使用密码: {}", secret);
+            println!("✅ 已启动 - 正在发现服务端...");
+            let mut retry_count = 0;
+            loop {
+                // 发现服务端
+                let addr = match discovery.discover().await {
+                    Ok(addr) => {
+                        if retry_count > 0 {
+                            println!("🔍 发现服务端成功 (已重试 {} 次)", retry_count);
+                        }
+                        retry_count = 0;
+                        addr
+                    },
+                    Err(e) => {
+                        if retry_count == 0 {
+                            eprintln!("❌ 发现服务端失败: {}, 正在重试...", e);
+                        }
+                        retry_count += 1;
+                        sleep(Duration::from_secs(1)).await;
+                        continue;
+                    }
+                };
+                
+                let url = format!("ws://{}", addr);
+                println!("🔍 发现服务端: {}, 正在连接...", addr);
+                
+                match AppClient::connect(&url).await {
+                    Ok(ws_stream) => {
+                        println!("✅ 已连接: {}", url);
+                        AppClient::handle_connection(ws_stream).await;
+                    }
+                    Err(e) => {
+                        eprintln!("❌ 连接失败: {}, 1秒后重试", e);
+                        sleep(Duration::from_secs(1)).await;
+                        continue;
+                    }
+                }
+            }
         }
+    }
+    
+    async fn handle_connection(ws_stream: WsStream) {
+        AppClient::init(ws_stream).await;
+        if let Err(e) = MessageManager::instance().process_messages().await {
+            eprintln!("❌ 消息处理异常: {}", e);
+        }
+        AppClient::dispose().await;
+        eprintln!("❌ 已断开连接");
     }
 
     async fn init(ws_stream: WsStream) {

@@ -47,3 +47,10 @@ __pycache__
 .mi.json
 xiaozhi.json
 open-xiaoai.node
+examples/xiaozhi/xiaozhi/models/bpe.model
+examples/xiaozhi/xiaozhi/models/decoder.onnx
+examples/xiaozhi/xiaozhi/models/encoder.onnx
+examples/xiaozhi/xiaozhi/models/joiner.onnx
+examples/xiaozhi/xiaozhi/models/keywords copy.txt
+examples/xiaozhi/xiaozhi/models/silero_vad.onnx
+examples/xiaozhi/xiaozhi/models/tokens.txt

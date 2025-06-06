@@ -1,0 +1,22 @@
+{
+  "name": "discovery-service-ts",
+  "version": "0.1.0",
+  "description": "TypeScript implementation of service discovery protocol",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/main.js",
+    "dev": "ts-node src/main.ts"
+  },
+  "author": "Open XiaoAI",
+  "license": "MIT",
+  "dependencies": {
+    "@types/yargs": "^17.0.33",
+    "yargs": "^17.7.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.19",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  }
+}

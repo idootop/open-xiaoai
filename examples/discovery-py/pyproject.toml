@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "discovery-service"
+version = "0.1.0"
+description = "A simple service discovery protocol server implementation"
+authors = [
+    {name = "Open XiaoAI", email = "example@example.com"}
+]
+readme = "README.md"
+requires-python = ">=3.7"
+
+[project.scripts]
+discovery = "main:main"

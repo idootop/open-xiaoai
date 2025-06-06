@@ -4,17 +4,19 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "ota": "tsx --env-file=.env src/ota.ts",
+    "ota": "tsx src/ota.ts",
     "extract": "sh src/extract.sh",
     "patch": "sh src/patch.sh",
     "squashfs": "sh src/squashfs.sh",
     "build": "sh src/build.sh"
   },
   "dependencies": {
-    "@mi-gpt/miot": "^1.0.0"
+    "@mi-gpt/miot": "^1.0.0",
+    "dotenv": "^16.4.1"
   },
   "devDependencies": {
     "@mi-gpt/config": "1.0.0",
+    "@types/dotenv": "^8.2.0",
     "@types/node": "^22.13.11",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2"
