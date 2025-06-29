@@ -201,7 +201,7 @@ class WebsocketProtocol(Protocol):
             if self.websocket and get_xiaozhi().device_state == DeviceState.IDLE:
                 try:
                     await self.send_text(
-                        json.dumps({"session_id": "", "type": "abort"})
+                        json.dumps({"session_id": "", "type": "ping"})
                     )
                 except Exception:
                     # 发送心跳失败，重新连接
