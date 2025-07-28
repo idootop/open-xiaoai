@@ -160,6 +160,10 @@ PS：如果还是不行，建议更换其他更易识别的唤醒词。
 
 由于 ASR 相关模型文件体积较大，并未直接提交在 git 仓库中，你可以在 release 中下载 [VAD + KWS 相关模型](https://github.com/idootop/open-xiaoai/releases/tag/vad-kws-models)，然后解压到 `xiaozhi/models` 路径下即可。
 
+## 相关项目
+
+- [oxa-server](https://github.com/pu-007/oxa-server): 提供了更强大易用的 config.py 的配置方式
+
 ## 鸣谢
 
 该演示使用的 Python 版小智 AI 客户端基于 [py-xiaozhi](https://github.com/Huang-junsen/py-xiaozhi) 项目，特此鸣谢。
