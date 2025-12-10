@@ -19,9 +19,52 @@ mkdir /data/open-xiaoai
 # 设置 server 地址（注意替换成自己的 server 地址）
 echo 'ws://192.168.31.227:4399' > /data/open-xiaoai/server.txt
 
+# 可选：设置 token（如果 Server 端启用了 token 验证）
+echo 'your-token-value' > /data/open-xiaoai/token.txt
+
 # 运行启动脚本 init.sh
 curl -sSfL https://gitee.com/idootop/artifacts/releases/download/open-xiaoai-client/init.sh | sh
 ```
+
+## Token 验证机制
+
+### 启用 Token 验证
+
+#### 方法一：通过命令行参数（推荐）
+```shell
+client ws://192.168.31.227:4399 my-token-value
+```
+
+#### 方法二：通过 token.txt 文件
+```shell
+# 在open-xiaoai目录下创建token.txt文件
+echo 'my-token-value' > /data/open-xiaoai/token.txt
+
+# 运行启动脚本，会自动读取token.txt文件
+curl -sSfL https://gitee.com/idootop/artifacts/releases/download/open-xiaoai-client/init.sh | sh
+```
+
+### 禁用 Token 验证
+
+- 不传入 token 参数
+- 或删除 `token.txt` 文件，或者清空文件内容
+
+### 验证流程
+
+1. WebSocket 连接建立后，Client 端立即发送 token 验证请求
+2. Server 端验证 token 的有效性
+3. 如果验证成功，Client 端继续正常运行
+4. 如果验证失败，Client 端会显示错误信息并断开连接
+
+### 错误信息
+
+- `Invalid token`: 提供的 token 与 Server 端配置的 token 不匹配
+- `Token required`: Server 端启用了 token 验证，但 Client 端未提供 token
+
+### 兼容性
+
+- 未配置 token 时，系统保持与当前版本的兼容性
+- 支持与不支持 token 验证的 Server 端版本兼容
 
 > [!IMPORTANT]
 > 你可能需要先在电脑上运行其他演示程序，以获取 server 地址

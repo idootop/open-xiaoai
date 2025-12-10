@@ -1,0 +1,42 @@
+name: Compile Client Rust
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'packages/client-rust/**'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'packages/client-rust/**'
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    if: github.repository == 'hehetoshang/open-xiaoai'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Install Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        override: true
+        components: rustfmt, clippy
+        target: armv7-unknown-linux-gnueabihf
+    
+    - name: Install cross
+      run: cargo install cross
+      
+    - name: Compile client-rust
+      working-directory: packages/client-rust
+      run: cross build --release --target armv7-unknown-linux-gnueabihf
+    
+    - name: Upload compiled binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: client-rust-binary
+        path: packages/client-rust/target/armv7-unknown-linux-gnueabihf/release/client
+        retention-days: 7

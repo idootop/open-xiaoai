@@ -55,6 +55,36 @@
 
 以上皆为抛砖引玉，你也可以亲手编写自己想要的功能，一切由你定义！
 
+## Token 验证机制
+
+为了增强 Client 端与 Server 端通信的安全性，本项目支持基于 token 的身份验证机制。
+
+### Client 端配置
+
+1. 在小爱音箱的 `open-xiaoai` 目录下创建 `token.txt` 文件
+2. 在文件中写入你的 token 值（文本文件，无需任何格式）
+3. 启动 Client 端后，会自动读取 token 文件并启用 token 验证模式
+4. 如果 `token.txt` 文件不存在或内容为空，则不启用 token 验证模式
+
+### Server 端配置
+
+在各示例的配置文件中添加 token 配置：
+
+- **xiaozhi**: 在 `config.py` 中添加 `server.token` 配置项
+- **migpt**: 在 `config.ts` 中添加 `server.token` 配置项
+- **gemini**: 通过环境变量 `OPEN_XIAOAI_TOKEN` 设置
+
+### 兼容性说明
+
+- 当 Client 端启用 token 模式而 Server 端未启用时，Server 端会返回明确的错误信息并拒绝连接
+- 当 Server 端启用 token 模式而 Client 端未提供 token 或 token 错误时，Server 端会返回明确的错误信息并拒绝连接
+- 所有错误信息包含具体原因，便于问题排查和版本兼容性判断
+- 未配置 token 时，系统保持与当前版本的兼容性
+
+### 环境变量支持
+
+Server 端也可以通过环境变量 `OPEN_XIAOAI_TOKEN` 设置 token 值，优先级高于配置文件。
+
 ## 相关项目
 
 > [!TIP]

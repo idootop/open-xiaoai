@@ -9,7 +9,7 @@ use open_xiaoai::base::AppError;
 use open_xiaoai::base::VERSION;
 use open_xiaoai::services::audio::play::AudioPlayer;
 use open_xiaoai::services::audio::record::AudioRecorder;
-use open_xiaoai::services::connect::data::{Event, Request, Response, Stream};
+use open_xiaoai::services::connect::data::{AuthResponse, Event, Request, Response, Stream};
 use open_xiaoai::services::connect::handler::MessageHandler;
 use open_xiaoai::services::connect::message::{MessageManager, WsStream};
 use open_xiaoai::services::connect::rpc::RPC;
@@ -20,14 +20,25 @@ struct AppClient {
     kws_monitor: KwsMonitor,
     instruction_monitor: InstructionMonitor,
     playing_monitor: PlayingMonitor,
+    token: Option<String>,
 }
 
 impl AppClient {
-    pub fn new() -> Self {
+    pub fn new(token_from_cli: Option<String>) -> Self {
+        // 只从命令行获取token，不再从文件读取
+        let token = if let Some(token) = token_from_cli {
+            println!("✅ 已从命令行获取token，将启用token验证");
+            Some(token)
+        } else {
+            println!("ℹ️ 未提供token，将不启用token验证");
+            None
+        };
+        
         Self {
             kws_monitor: KwsMonitor::new(),
             instruction_monitor: InstructionMonitor::new(),
             playing_monitor: PlayingMonitor::new(),
+            token,
         }
     }
 
@@ -37,10 +48,18 @@ impl AppClient {
     }
 
     pub async fn run(&mut self) {
-        let url = std::env::args().nth(1).expect("❌ 请输入服务器地址");
+        let args: Vec<String> = std::env::args().collect();
+        if args.len() < 2 {
+            eprintln!("❌ 请输入服务器地址");
+            eprintln!("用法: client <server_url> [token]");
+            eprintln!("示例: client ws://192.168.31.227:4399 my-token");
+            std::process::exit(1);
+        }
+        
+        let url = &args[1];
         println!("✅ 已启动");
         loop {
-            let Ok(ws_stream) = self.connect(&url).await else {
+            let Ok(ws_stream) = self.connect(url).await else {
                 sleep(Duration::from_secs(1)).await;
                 continue;
             };
@@ -56,6 +75,16 @@ impl AppClient {
 
     async fn init(&mut self, ws_stream: WsStream) {
         MessageManager::instance().init(ws_stream).await;
+        
+        // 设置认证响应处理
+        MessageHandler::<AuthResponse>::instance()
+            .set_handler(on_auth_response)
+            .await;
+        
+        // 发送认证请求
+        MessageManager::instance().send_auth(self.token.clone()).await.unwrap();
+        
+        // 设置其他事件处理
         MessageHandler::<Event>::instance()
             .set_handler(on_event)
             .await;
@@ -169,7 +198,26 @@ async fn on_stream(stream: Stream) -> Result<(), AppError> {
     Ok(())
 }
 
+async fn on_auth_response(auth_response: AuthResponse) -> Result<(), AppError> {
+    if auth_response.success {
+        println!("✅ 认证成功");
+    } else {
+        eprintln!("❌ 认证失败: {:?} (code: {:?})", auth_response.msg, auth_response.code);
+        // 认证失败，断开连接
+        MessageManager::instance().dispose().await;
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
-    AppClient::new().run().await;
+    let args: Vec<String> = std::env::args().collect();
+    // 获取命令行中的token参数（可选）
+    let token = if args.len() > 2 {
+        Some(args[2].clone())
+    } else {
+        None
+    };
+    
+    AppClient::new(token).run().await;
 }

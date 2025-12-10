@@ -23,6 +23,12 @@ export const kOpenXiaoAIConfig: OpenXiaoAIConfig = {
      */
     model: "gpt-4.1-mini",
   },
+  server: {
+    /**
+     * 服务器端token配置，如果为空则不启用token验证
+     */
+    token: "",
+  },
   prompt: {
     /**
      * 系统提示词，如需关闭可设置为：''（空字符串）

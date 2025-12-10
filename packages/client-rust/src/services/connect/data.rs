@@ -8,6 +8,54 @@ pub enum AppMessage {
     Response(Response),
     Event(Event),
     Stream(Stream),
+    Auth(AuthRequest),
+    AuthResponse(AuthResponse),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthRequest {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub token: Option<String>,
+}
+
+impl AuthRequest {
+    pub fn new(token: Option<String>) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            token,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthResponse {
+    pub id: String,
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub msg: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub code: Option<i32>,
+}
+
+impl AuthResponse {
+    pub fn success(id: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            success: true,
+            msg: Some("Authentication successful".to_string()),
+            code: Some(0),
+        }
+    }
+
+    pub fn error(id: &str, code: i32, msg: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            success: false,
+            msg: Some(msg.to_string()),
+            code: Some(code),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

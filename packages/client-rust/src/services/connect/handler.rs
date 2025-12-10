@@ -6,7 +6,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::base::AppError;
 
-use super::data::{AppMessage, Event, Request, Response, Stream};
+use super::data::{AppMessage, AuthResponse, Event, Request, Response, Stream};
 use super::message::MessageManager;
 use super::rpc::RPC;
 
@@ -19,7 +19,8 @@ pub struct MessageHandler<T> {
 static REQUEST_INSTANCE: LazyLock<MessageHandler<Request>> = LazyLock::new(MessageHandler::new);
 static RESPONSE_INSTANCE: LazyLock<MessageHandler<Response>> = LazyLock::new(MessageHandler::new);
 static EVENT_INSTANCE: LazyLock<MessageHandler<Event>> = LazyLock::new(MessageHandler::new);
-static BYTES_INSTANCE: LazyLock<MessageHandler<Stream>> = LazyLock::new(MessageHandler::new);
+static STREAM_INSTANCE: LazyLock<MessageHandler<Stream>> = LazyLock::new(MessageHandler::new);
+static AUTH_RESPONSE_INSTANCE: LazyLock<MessageHandler<AuthResponse>> = LazyLock::new(MessageHandler::new);
 
 impl<T> MessageHandler<T> {
     fn new() -> Self {
@@ -88,6 +89,12 @@ impl MessageHandler<Event> {
 
 impl MessageHandler<Stream> {
     pub fn instance() -> &'static MessageHandler<Stream> {
-        &BYTES_INSTANCE
+        &STREAM_INSTANCE
+    }
+}
+
+impl MessageHandler<AuthResponse> {
+    pub fn instance() -> &'static MessageHandler<AuthResponse> {
+        &AUTH_RESPONSE_INSTANCE
     }
 }

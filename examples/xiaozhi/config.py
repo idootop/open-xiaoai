@@ -34,6 +34,10 @@ async def after_wakeup(speaker):
 
 
 APP_CONFIG = {
+    "server": {
+        # 服务器端token配置，如果为空则不启用token验证
+        "token": "",
+    },
     "wakeup": {
         # 自定义唤醒词列表（英文字母要全小写）
         "keywords": [

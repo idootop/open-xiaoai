@@ -37,8 +37,18 @@ if [ -f "$WORK_DIR/server.txt" ]; then
     SERVER_ADDRESS=$(cat "$WORK_DIR/server.txt")
 fi
 
+# 读取token.txt文件（如果存在）
+TOKEN=""
+if [ -f "$WORK_DIR/token.txt" ]; then
+    TOKEN=$(cat "$WORK_DIR/token.txt" | tr -d '\n')
+fi
+
 echo "🔥 正在启动 Client 端补丁程序..."
 
 kill -9 `ps|grep "open-xiaoai/client"|grep -v grep|awk '{print $1}'` > /dev/null 2>&1 || true
 
-"$CLIENT_BIN" "$SERVER_ADDRESS"
+if [ -z "$TOKEN" ]; then
+    "$CLIENT_BIN" "$SERVER_ADDRESS"
+else
+    "$CLIENT_BIN" "$SERVER_ADDRESS" "$TOKEN"
+fi

@@ -12,7 +12,7 @@ use super::rpc::RPC;
 use crate::base::AppError;
 use crate::utils::task::TaskManager;
 
-use super::data::{AppMessage, Event, Request, Response, Stream};
+use super::data::{AppMessage, AuthRequest, AuthResponse, Event, Request, Response, Stream};
 use super::handler::MessageHandler;
 
 pub enum WsStream {
@@ -72,6 +72,12 @@ impl MessageManager {
                     .await
             })
             .await;
+    }
+
+    pub async fn send_auth(&self, token: Option<String>) -> Result<(), AppError> {
+        let auth = AuthRequest::new(token);
+        let data = serde_json::to_string(&AppMessage::Auth(auth)).unwrap();
+        self.send(Message::Text(data.into())).await
     }
 
     pub async fn dispose(&self) {
@@ -178,8 +184,39 @@ impl MessageManager {
                     .await
             }
             AppMessage::Event(event) => MessageHandler::<Event>::instance().on(event).await,
+            AppMessage::Auth(auth_request) => {
+                // Server端处理Client的认证请求
+                self.handle_auth_request(auth_request).await
+            }
+            AppMessage::AuthResponse(auth_response) => {
+                // Client端处理Server的认证响应
+                MessageHandler::<AuthResponse>::instance().on(auth_response).await
+            }
             _ => Ok(()),
         }
+    }
+
+    async fn handle_auth_request(&self, auth_request: AuthRequest) -> Result<(), AppError> {
+        // 获取Server端配置的token
+        let server_token = std::env::var("OPEN_XIAOAI_TOKEN").ok();
+        
+        let response = if let Some(token) = server_token {
+            // Server端配置了token，需要验证
+            if auth_request.token.as_deref() == Some(token.as_str()) {
+                println!("✅ 认证成功: Client端提供了正确的token");
+                AuthResponse::success(&auth_request.id)
+            } else {
+                println!("❌ 认证失败: Client端提供的token无效");
+                AuthResponse::error(&auth_request.id, 401, "无效的token")
+            }
+        } else {
+            // Server端未配置token，直接通过验证
+            println!("ℹ️  Server端未配置token，跳过认证");
+            AuthResponse::success(&auth_request.id)
+        };
+        
+        let data = serde_json::to_string(&AppMessage::AuthResponse(response)).unwrap();
+        self.send(Message::Text(data.into())).await
     }
 
     async fn run_concurrently<F, Fut>(&self, run: F) -> Result<(), AppError>
