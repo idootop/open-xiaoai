@@ -13,7 +13,6 @@ on:
 jobs:
   compile:
     runs-on: ubuntu-latest
-    if: github.repository == 'hehetoshang/open-xiaoai'
     
     steps:
     - name: Checkout code
