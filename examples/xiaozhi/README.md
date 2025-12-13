@@ -29,6 +29,10 @@ cd examples/xiaozhi
 
 ```typescript
 APP_CONFIG = {
+    "server": {
+        # 服务器端token配置，如果为空则启用兼容模式
+        "token": "",
+    },
     "wakeup": {
         # 自定义唤醒词
         "keywords": [
@@ -43,6 +47,36 @@ APP_CONFIG = {
     },
 }
 ```
+
+## Token 验证机制
+
+### 启用 Token 验证
+
+#### 方法一：通过配置文件
+在 `config.py` 文件中设置 `server.token` 配置项：
+
+```python
+APP_CONFIG = {
+    "server": {
+        # 设置token值
+        "token": "my-token-value",
+    },
+    # 其他配置
+}
+```
+
+#### 方法二：通过环境变量
+```shell
+# 设置 OPEN_XIAOAI_TOKEN 环境变量
+set OPEN_XIAOAI_TOKEN=my-token-value
+
+# 运行程序
+uv run main.py
+```
+
+### 兼容模式
+
+当 `server.token` 配置项为空或未设置，且 `OPEN_XIAOAI_TOKEN` 环境变量为空时，系统将自动启用兼容模式，保持与现有版本的通信方式。
 
 ### Docker 运行
 

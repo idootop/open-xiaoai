@@ -35,5 +35,27 @@ uv run main.py
 
 该演示暂不支持中断 AI 的回复，需要等待 AI 回答完毕后才能重新响应用户的语音输入。
 
+## Token 验证机制
+
+### 启用 Token 验证
+
+#### 方法一：通过环境变量
+```shell
+# 设置 OPEN_XIAOAI_TOKEN 环境变量
+set OPEN_XIAOAI_TOKEN=my-token-value
+
+# 运行程序
+uv run main.py
+```
+
+#### 方法二：通过命令行参数
+```shell
+# 目前暂不支持，后续更新
+```
+
+### 兼容模式
+
+当 `OPEN_XIAOAI_TOKEN` 环境变量为空时，系统将自动启用兼容模式，保持与现有版本的通信方式。
+
 > [!NOTE]
 > 本项目只是一个简单的演示程序，抛砖引玉。如果你想要更多的功能，可以借助 Python 丰富的 AI 生态自行实现。
