@@ -39,18 +39,12 @@ uv run main.py
 
 ### 启用 Token 验证
 
-#### 方法一：通过环境变量
 ```shell
 # 设置 OPEN_XIAOAI_TOKEN 环境变量
 set OPEN_XIAOAI_TOKEN=my-token-value
 
 # 运行程序
 uv run main.py
-```
-
-#### 方法二：通过命令行参数
-```shell
-# 目前暂不支持，后续更新
 ```
 
 ### 兼容模式

@@ -1,7 +1,7 @@
 use neon::prelude::Context;
 use neon::types::JsUint8Array;
 use open_xiaoai::base::{AppError, VERSION};
-use open_xiaoai::services::connect::data::{Event, Request, Response, Stream};
+use open_xiaoai::services::connect::data::{AppMessage, AuthRequest, AuthResponse, Event, Request, Response, Stream};
 use open_xiaoai::services::connect::handler::MessageHandler;
 use open_xiaoai::services::connect::message::{MessageManager, WsStream};
 use open_xiaoai::services::connect::rpc::RPC;
@@ -68,6 +68,9 @@ impl AppServer {
         MessageHandler::<Stream>::instance()
             .set_handler(on_stream)
             .await;
+        MessageHandler::<AuthResponse>::instance()
+            .set_handler(on_auth_response)
+            .await;
 
         let rpc = RPC::instance();
         rpc.add_command("get_version", get_version).await;
@@ -77,6 +80,31 @@ impl AppServer {
             let _ = test().await;
         });
         TaskManager::instance().add("test", test).await;
+    }
+
+    async fn handle_auth_request(&self, auth_request: AuthRequest) -> Result<(), AppError> {
+        // 获取Server端配置的token（从环境变量读取）
+        let server_token = std::env::var("OPEN_XIAOAI_TOKEN").ok();
+        
+        let response = if let Some(token) = server_token {
+            // Server端配置了token，需要验证
+            if auth_request.token.as_deref() == Some(token.as_str()) {
+                println!("✅ 认证成功: Client端提供了正确的token");
+                AuthResponse::success(&auth_request.id)
+            } else {
+                println!("❌ 认证失败: Client端提供的token无效");
+                AuthResponse::error(&auth_request.id, 401, "无效的token")
+            }
+        } else {
+            // Server端未配置token，直接通过验证（兼容模式）
+            println!("ℹ️  Server端未配置token，启用兼容模式");
+            AuthResponse::success(&auth_request.id)
+        };
+        
+        let data = serde_json::to_string(&AppMessage::AuthResponse(response)).unwrap();
+        MessageManager::instance()
+            .send(Message::Text(data.into()))
+            .await
     }
 
     async fn dispose() {
@@ -116,5 +144,14 @@ async fn on_event(event: Event) -> Result<(), AppError> {
             |_, _| Ok(()),
         )
         .await?;
+    Ok(())
+}
+
+async fn on_auth_response(auth_response: AuthResponse) -> Result<(), AppError> {
+    if auth_response.success {
+        println!("✅ 认证成功");
+    } else {
+        println!("❌ 认证失败: {:?} (code: {:?})", auth_response.msg, auth_response.code);
+    }
     Ok(())
 }

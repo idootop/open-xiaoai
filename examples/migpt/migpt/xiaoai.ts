@@ -22,6 +22,19 @@ class OpenXiaoAIEngine extends MiGPTEngine {
       on_event: this.onEvent,
       on_input_data: this.onRecord,
     };
+    
+    // 优先从环境变量读取token，然后从配置文件读取
+    const token = process.env.OPEN_XIAOAI_TOKEN || config.server?.token;
+    if (token) {
+      console.log("🔒 已配置token，启用token验证模式");
+      // 设置环境变量，供Rust服务器读取
+      process.env.OPEN_XIAOAI_TOKEN = token;
+    } else {
+      console.log("ℹ️  未配置token，启用兼容模式");
+      // 确保环境变量为空，启用兼容模式
+      delete process.env.OPEN_XIAOAI_TOKEN;
+    }
+    
     // 启动服务
     console.log("✅ 服务已启动...");
     await RustServer.start();

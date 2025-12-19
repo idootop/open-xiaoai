@@ -110,6 +110,11 @@ class XiaoAI:
         GlobalStream.on_output_data = cls.on_output_data
         open_xiaoai_server.register_fn("on_input_data", cls.on_input_data)
         open_xiaoai_server.register_fn("on_event", cls.__on_event)
-        cls.__init_background_event_loop()
         print(ASCII_BANNER)
-        await open_xiaoai_server.start_server()
+        
+        # 优先从环境变量读取token，然后从配置文件读取
+        import os
+        from config import APP_CONFIG
+        token = os.getenv("OPEN_XIAOAI_TOKEN") or APP_CONFIG.get("server", {}).get("token")
+        
+        await open_xiaoai_server.start_server(token)
