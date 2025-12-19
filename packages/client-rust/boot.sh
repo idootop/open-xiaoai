@@ -1,6 +1,7 @@
 #!/bin/sh
 
-exec > /dev/null 2>&1
+# 保留日志重定向，但允许错误输出
+# exec > /dev/null 2>&1
 
 cat << 'EOF'
 
@@ -13,7 +14,8 @@ v1.0.0  by: https://del.wang
 
 EOF
 
-set -e
+# 移除set -e，避免脚本因单个命令失败而退出
+# set -e
 
 echo "🤫 等待网络连接中..."
 
@@ -21,39 +23,56 @@ sleep 5
 
 DOWNLOAD_BASE_URL="https://gitee.com/idootop/artifacts/releases/download/open-xiaoai-client"
 
-
 WORK_DIR="/data/open-xiaoai"
 CLIENT_BIN="$WORK_DIR/client"
 SERVER_ADDRESS="ws://127.0.0.1:4399" # 默认不会连接到任何 server
 
-if [ ! -d "$WORK_DIR" ]; then
-    mkdir -p "$WORK_DIR"
-fi
+# 创建工作目录，忽略错误
+mkdir -p "$WORK_DIR" 2>/dev/null || true
 
+# 下载client程序，添加重试机制
 if [ ! -f "$CLIENT_BIN" ]; then
     echo "🔥 正在下载 Client 端补丁程序..."
-    curl -L -# -o "$CLIENT_BIN" "$DOWNLOAD_BASE_URL/client"
-    chmod +x "$CLIENT_BIN"
-    echo "✅ Client 端补丁程序下载完毕"
+    # 最多重试3次
+    for i in 1 2 3; do
+        if curl -L -# -o "$CLIENT_BIN" "$DOWNLOAD_BASE_URL/client" 2>/dev/null; then
+            chmod +x "$CLIENT_BIN" 2>/dev/null || true
+            echo "✅ Client 端补丁程序下载完毕"
+            break
+        else
+            echo "❌ 下载失败，第 $i 次重试..."
+            sleep 2
+        fi
+    done
 fi
 
-
+# 读取server地址，忽略错误
 if [ -f "$WORK_DIR/server.txt" ]; then
-    SERVER_ADDRESS=$(cat "$WORK_DIR/server.txt")
+    SERVER_ADDRESS=$(cat "$WORK_DIR/server.txt" 2>/dev/null || echo "ws://127.0.0.1:4399")
 fi
 
-# 读取token.txt文件（如果存在）
+# 读取token.txt文件（如果存在），忽略错误
 TOKEN=""
 if [ -f "$WORK_DIR/token.txt" ]; then
-    TOKEN=$(cat "$WORK_DIR/token.txt" | tr -d '\n')
+    TOKEN=$(cat "$WORK_DIR/token.txt" 2>/dev/null | tr -d '\n' || echo "")
 fi
 
 echo "🔥 正在启动 Client 端补丁程序..."
 
-kill -9 `ps|grep "open-xiaoai/client"|grep -v grep|awk '{print $1}'` > /dev/null 2>&1 || true
-
-if [ -z "$TOKEN" ]; then
-    "$CLIENT_BIN" "$SERVER_ADDRESS" > /dev/null 2>&1
-else
-    "$CLIENT_BIN" "$SERVER_ADDRESS" "$TOKEN" > /dev/null 2>&1
+# 改进的kill命令，避免管道命令导致脚本退出
+PID=$(ps | grep -E "[o]pen-xiaoai/client" | awk '{print $1}' 2>/dev/null || true)
+if [ -n "$PID" ]; then
+    kill -9 "$PID" 2>/dev/null || true
 fi
+
+# 启动client程序，添加自动重启机制
+echo "🔄 启动Client程序，崩溃时将自动重启..."
+while true; do
+    if [ -z "$TOKEN" ]; then
+        "$CLIENT_BIN" "$SERVER_ADDRESS" > /dev/null 2>&1 || true
+    else
+        "$CLIENT_BIN" "$SERVER_ADDRESS" "$TOKEN" > /dev/null 2>&1 || true
+    fi
+    # 避免频繁重启，添加5秒延迟
+    sleep 5
+done
