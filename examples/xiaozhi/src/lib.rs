@@ -21,13 +21,13 @@ fn on_output_data(py: Python, data: Py<PyBytes>) -> PyResult<Bound<PyAny>> {
 }
 
 #[pyfunction]
-fn start_server(py: Python, token: Option<&str>) -> PyResult<Bound<PyAny>> {
+fn start_server<'a>(py: Python<'a>, token: Option<&str>) -> PyResult<Bound<'a, PyAny>> {
     // 如果提供了token，设置环境变量
     if let Some(t) = token {
         std::env::set_var("OPEN_XIAOAI_TOKEN", t);
     }
     
-    pyo3_async_runtimes::tokio::future_into_py(py, async {
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
         AppServer::run().await;
         Ok(())
     })
