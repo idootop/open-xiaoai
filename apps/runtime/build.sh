@@ -12,25 +12,19 @@ PROXY="http://host.docker.internal:7890"
 #     --build-arg https_proxy=$PROXY \
 #     -t open-xiaoai-runtime .
 
-# # 2. 编译 hello world demo
+# 2. 编译 hello world demo
 echo "Compiling hello demo..."
-rm -rf ../hello/target # 先清理旧的构建产物，防止缓存干扰
 docker run --rm -v $(pwd)/../hello:/app/hello open-xiaoai-runtime \
     cargo build --manifest-path hello/Cargo.toml --target armv7-unknown-linux-gnueabihf --release
 
-# # 3. 运行编译出的二进制文件 (通过 QEMU 模拟)
-echo "Running compiled binary via QEMU..."
-docker run --rm -v $(pwd)/../hello/target/armv7-unknown-linux-gnueabihf/release/hello:/app/hello \
-    -v $(pwd)/root.squashfs:/app/root.squashfs open-xiaoai-runtime \
-    run /app/hello
+# 3. 运行编译出的二进制文件 (通过 QEMU 模拟)
+# echo "Running compiled binary via QEMU..."
+# docker run --rm -v $(pwd)/../hello/target/armv7-unknown-linux-gnueabihf/release/hello:/app/hello open-xiaoai-runtime \
+#     run /app/hello
 
 # 4. 交互模式运行
-# docker run --rm -it --privileged \
-#     -v $(pwd)/root.squashfs:/app/root.squashfs \
-#     open-xiaoai-runtime \
-#     run
+# docker run --rm -it --privileged open-xiaoai-runtime run
 
 # 5. 上传二进制文件到小爱音箱
-# dd if=target/armv7-unknown-linux-gnueabihf/release/hello \
+# dd if=apps/hello/target/armv7-unknown-linux-gnueabihf/release/hello \
 # | ssh -o HostKeyAlgorithms=+ssh-rsa root@192.168.31.235 "dd of=/data/hello"
-# ssh -o HostKeyAlgorithms=+ssh-rsa root@192.168.31.235 "dd if=/data/hello" | hello

@@ -1,0 +1,31 @@
+use opus::{Encoder, Decoder, Application, Bitrate, Channels};
+use anyhow::{Result, Context};
+use crate::config::AudioConfig;
+
+pub struct OpusCodec {
+    encoder: Encoder,
+    decoder: Decoder,
+}
+
+impl OpusCodec {
+    pub fn new(config: &AudioConfig) -> Result<Self> {
+        let channels = if config.channels == 1 { Channels::Mono } else { Channels::Stereo };
+        let mut encoder = Encoder::new(config.sample_rate, channels, Application::Voip)
+            .context("Failed to create Opus encoder")?;
+        encoder.set_bitrate(Bitrate::Bits(config.bitrate))?;
+
+        let decoder = Decoder::new(config.sample_rate, channels)
+            .context("Failed to create Opus decoder")?;
+
+        Ok(Self { encoder, decoder })
+    }
+
+    pub fn encode(&mut self, pcm: &[i16], out: &mut [u8]) -> Result<usize> {
+        self.encoder.encode(pcm, out).context("Opus encoding failed")
+    }
+
+    pub fn decode(&mut self, opus: &[u8], out: &mut [i16]) -> Result<usize> {
+        self.decoder.decode(opus, out, false).context("Opus decoding failed")
+    }
+}
+
