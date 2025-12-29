@@ -19,41 +19,16 @@ const FIFO_PATH: &str = "/tmp/stereo_out.fifo";
 const REAL_ASOUND_CONF: &str = "/etc/asound.conf";
 const TEMP_ASOUND_CONF: &str = "/tmp/asound.stereo.conf";
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum DeviceModel {
-    Lx06,
-    Oh2p,
-    Unknown,
-}
-
-fn detect_model() -> DeviceModel {
-    let model = Command::new("sh")
-        .args(["-c", "micocfg_model"])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        .unwrap_or_default()
-        .to_uppercase();
-    if model.contains("LX06") {
-        return DeviceModel::Lx06;
-    } else if model.contains("OH2P") {
-        return DeviceModel::Oh2p;
-    }
-    DeviceModel::Unknown
-}
-
-fn setup_alsa_config(model: DeviceModel) -> Result<()> {
+fn setup_alsa_config() -> Result<()> {
     cleanup_alsa_config();
 
-    let original_conf = match model {
-        DeviceModel::Lx06 => include_str!("../config/asound.lx06.conf"),
-        DeviceModel::Oh2p => include_str!("../config/asound.oh2p.conf"),
-        DeviceModel::Unknown => return Err(anyhow::anyhow!("Unsupported device model")),
-    };
+    let original_conf = fs::read_to_string(REAL_ASOUND_CONF)?;
 
-    // 重命名原有的 default 逻辑，插入 interceptor
-    let mut new_conf = original_conf.replace("pcm.!default", "pcm.original_default");
-    new_conf.push_str(&format!(
-        r#"
+    if !original_conf.contains("pcm.original_default") {
+        // 重命名原有的 default 逻辑，插入 interceptor
+        let mut new_conf = original_conf.replace("pcm.!default", "pcm.original_default");
+        new_conf.push_str(&format!(
+            r#"
 pcm.!default {{
     type plug
     slave.pcm "stereo_interceptor"
@@ -66,26 +41,27 @@ pcm.stereo_interceptor {{
     format "raw"
 }}
 "#,
-        FIFO_PATH
-    ));
+            FIFO_PATH
+        ));
 
-    fs::write(TEMP_ASOUND_CONF, new_conf)?;
+        fs::write(TEMP_ASOUND_CONF, new_conf)?;
+
+        // 挂载覆盖 /etc/asound.conf
+        let status = Command::new("mount")
+            .arg("--bind")
+            .arg(TEMP_ASOUND_CONF)
+            .arg(REAL_ASOUND_CONF)
+            .status()
+            .context("Failed to execute mount command")?;
+
+        if !status.success() {
+            return Err(anyhow::anyhow!("Failed to mount asound.conf"));
+        }
+    }
 
     // 创建 FIFO
     let _ = Command::new("mkfifo").arg(FIFO_PATH).status();
     let _ = Command::new("chmod").arg("666").arg(FIFO_PATH).status();
-
-    // 挂载覆盖 /etc/asound.conf
-    let status = Command::new("mount")
-        .arg("--bind")
-        .arg(TEMP_ASOUND_CONF)
-        .arg(REAL_ASOUND_CONF)
-        .status()
-        .context("Failed to execute mount command")?;
-
-    if !status.success() {
-        return Err(anyhow::anyhow!("Failed to mount asound.conf"));
-    }
 
     println!("Successfully redirected ALSA output to {}", FIFO_PATH);
     Ok(())
@@ -146,11 +122,6 @@ async fn run_master(role: ChannelRole) -> Result<()> {
         ..AudioConfig::default()
     };
 
-    let model = detect_model();
-    if model == DeviceModel::Unknown {
-        eprintln!("警告: 无法识别设备型号，尝试使用默认配置");
-    }
-
     println!("--- 主设备模式 ---");
     println!("本地声道: {:?}", role);
 
@@ -209,7 +180,7 @@ async fn run_master(role: ChannelRole) -> Result<()> {
         }
 
         // 4. 初始化音频并开始拦截
-        setup_alsa_config(model)?;
+        setup_alsa_config()?;
 
         let res = run_master_audio_loop(&mut slave_stream, role.clone(), &config).await;
 
@@ -340,11 +311,6 @@ async fn run_slave(role: ChannelRole) -> Result<()> {
         ..AudioConfig::default()
     };
 
-    let model = detect_model();
-    if model == DeviceModel::Unknown {
-        eprintln!("警告: 无法识别设备型号，尝试使用默认配置");
-    }
-
     println!("--- 从设备模式 ---");
     println!("本地声道: {:?}", role);
 
@@ -419,7 +385,7 @@ async fn run_slave(role: ChannelRole) -> Result<()> {
         }
 
         // 4. 初始化音频并开始播放
-        setup_alsa_config(model)?;
+        setup_alsa_config()?;
 
         let res = run_slave_audio_loop(stream, &config, clock).await;
 
