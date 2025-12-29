@@ -14,13 +14,12 @@ debug = false
 [dependencies]
 opus = "0.3"
 anyhow = "1.0"
-tokio = { version = "1.47", features = ["full"] }
-symphonia = { version = "0.5", features = ["mp3", "isomp4"] }
+tokio = { version = "1.48", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 postcard = { version = "1.0", features = ["alloc", "use-std"] }
-log = "0.4"
-env_logger = "0.11"
-byteorder = "1.5"
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+symphonia = { version = "0.5", features = ["mp3", "wav", "pcm"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 alsa = "0.11"

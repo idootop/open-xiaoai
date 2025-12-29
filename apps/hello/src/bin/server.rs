@@ -1,29 +1,21 @@
-use anyhow::{Context, Result};
-use hello::audio::OpusCodec;
+use anyhow::Result;
+use hello::audio::{AudioReader, OpusCodec};
 use hello::config::AudioConfig;
 use hello::net::{AudioPacket, ChannelRole, ControlPacket, Discovery, SERVER_PORT};
 use hello::sync::now_us;
 use std::collections::HashMap;
-use std::fs::File;
-use std::path::Path;
 use std::sync::Arc;
-use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::DecoderOptions;
-use symphonia::core::formats::FormatOptions;
-use symphonia::core::io::MediaSourceStream;
-use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::init();
     let config = AudioConfig {
         sample_rate: 48000,
         channels: 1,
         frame_size: 960, // 20ms at 48kHz
+        bitrate: 32000,  // 32kbps
         ..AudioConfig::default()
     };
 
@@ -76,34 +68,17 @@ async fn main() -> Result<()> {
     println!("Both clients connected. Starting stream in 1s...");
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-    stream_mp3("test.mp3", &config, clients).await?;
+    stream_audio("test.mp3", &config, clients).await?;
 
     Ok(())
 }
 
-async fn stream_mp3(
+async fn stream_audio(
     path: &str,
     config: &AudioConfig,
     clients: Arc<Mutex<HashMap<ChannelRole, TcpStream>>>,
 ) -> Result<()> {
-    let src = File::open(Path::new(path)).context("Failed to open test.mp3")?;
-    let mss = MediaSourceStream::new(Box::new(src), Default::default());
-    let probed = symphonia::default::get_probe().format(
-        &Hint::new(),
-        mss,
-        &FormatOptions::default(),
-        &MetadataOptions::default(),
-    )?;
-
-    let mut format = probed.format;
-    let track = format
-        .tracks()
-        .iter()
-        .find(|t| t.codec_params.codec == symphonia::core::codecs::CODEC_TYPE_MP3)
-        .context("No track")?;
-    let mut decoder =
-        symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default())?;
-    let track_id = track.id;
+    let mut reader = AudioReader::new(path)?;
 
     let mut left_codec = OpusCodec::new(config)?;
     let mut right_codec = OpusCodec::new(config)?;
@@ -113,76 +88,22 @@ async fn stream_mp3(
     let frame_duration_us =
         (config.frame_size as f64 / config.sample_rate as f64 * 1_000_000.0) as u128;
 
-    let mut sample_buf = None;
-
-    loop {
-        let packet = match format.next_packet() {
-            Ok(packet) => packet,
-            Err(_) => break,
-        };
-        if packet.track_id() != track_id {
-            continue;
+    while let Some((left_pcm, right_pcm)) = reader.read_chunk(config.frame_size)? {
+        if left_pcm.len() < config.frame_size {
+            break;
         }
 
-        let decoded = decoder.decode(&packet)?;
-        if sample_buf.is_none() {
-            sample_buf = Some(SampleBuffer::<i16>::new(
-                decoded.capacity() as u64,
-                *decoded.spec(),
-            ));
-        }
-
-        if let Some(buf) = sample_buf.as_mut() {
-            buf.copy_interleaved_ref(decoded.clone());
-            let spec = decoded.spec();
-            let num_channels = spec.channels.count();
-
-            if num_channels == 2 {
-                for chunk in buf.samples().chunks(config.frame_size * 2) {
-                    if chunk.len() < config.frame_size * 2 {
-                        break;
-                    }
-
-                    let mut left_pcm = vec![0i16; config.frame_size];
-                    let mut right_pcm = vec![0i16; config.frame_size];
-
-                    for i in 0..config.frame_size {
-                        left_pcm[i] = chunk[i * 2];
-                        right_pcm[i] = chunk[i * 2 + 1];
-                    }
-
-                    send_packets(
-                        &clients,
-                        &mut left_codec,
-                        &mut right_codec,
-                        &left_pcm,
-                        &right_pcm,
-                        current_frame_ts,
-                    )
-                    .await?;
-                    current_frame_ts += frame_duration_us;
-                    pace(current_frame_ts).await;
-                }
-            } else {
-                for chunk in buf.samples().chunks(config.frame_size) {
-                    if chunk.len() < config.frame_size {
-                        break;
-                    }
-
-                    send_packets(
-                        &clients,
-                        &mut left_codec,
-                        &mut right_codec,
-                        chunk,
-                        chunk,
-                        current_frame_ts,
-                    )
-                    .await?;
-                    current_frame_ts += frame_duration_us;
-                    pace(current_frame_ts).await;
-                }
-            }
-        }
+        send_packets(
+            &clients,
+            &mut left_codec,
+            &mut right_codec,
+            &left_pcm,
+            &right_pcm,
+            current_frame_ts,
+        )
+        .await?;
+        current_frame_ts += frame_duration_us;
+        pace(current_frame_ts).await;
     }
     Ok(())
 }

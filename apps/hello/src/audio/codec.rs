@@ -10,7 +10,7 @@ pub struct OpusCodec {
 impl OpusCodec {
     pub fn new(config: &AudioConfig) -> Result<Self> {
         let channels = if config.channels == 1 { Channels::Mono } else { Channels::Stereo };
-        let mut encoder = Encoder::new(config.sample_rate, channels, Application::Voip)
+        let mut encoder = Encoder::new(config.sample_rate, channels, Application::Audio)
             .context("Failed to create Opus encoder")?;
         encoder.set_bitrate(Bitrate::Bits(config.bitrate))?;
 

@@ -23,7 +23,6 @@ async fn main() -> Result<()> {
 
     #[cfg(target_os = "linux")]
     {
-        env_logger::init();
         let args: Vec<String> = env::args().collect();
         if args.len() < 2 {
             eprintln!("Usage: {} [left|right]", args[0]);
@@ -39,6 +38,7 @@ async fn main() -> Result<()> {
             sample_rate: 48000,
             channels: 1,
             frame_size: 960,
+            bitrate: 32000,
             ..AudioConfig::default()
         };
 
