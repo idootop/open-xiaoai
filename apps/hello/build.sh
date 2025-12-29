@@ -31,3 +31,11 @@ upload_to_xiaoai stereo 192.168.31.235 # right
 # /data/stereo slave left
 
 # /data/stereo master right
+
+
+# ubus call mediaplayer player_play_url '{"url":"/tmp/test.wav","type":1}'
+
+# /etc/init.d/mediaplayer restart >/dev/null 2>&1
+# /etc/init.d/miio  restart >/dev/null 2>&1
+# /etc/init.d/mico_aivs_lab  restart >/dev/null 2>&1
+# /etc/init.d/miplay  restart >/dev/null 2>&1

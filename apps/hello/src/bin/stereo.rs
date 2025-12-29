@@ -7,7 +7,6 @@ use hello::sync::{ClockSync, now_us};
 use std::collections::VecDeque;
 use std::env;
 use std::fs;
-use std::io::Read;
 use std::net::SocketAddr;
 use std::process::Command;
 use std::time::Duration;
@@ -35,7 +34,7 @@ fn detect_model() -> DeviceModel {
     let model = Command::new("sh")
         .args(["-c", "micocfg_model"])
         .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned()) // 转换为独立的 String
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
         .unwrap_or_default()
         .to_uppercase();
     if model.contains("LX06") {
@@ -48,6 +47,8 @@ fn detect_model() -> DeviceModel {
 
 #[cfg(target_os = "linux")]
 fn setup_alsa_config(model: DeviceModel) -> Result<()> {
+    cleanup_alsa_config();
+
     let original_conf = match model {
         DeviceModel::Lx06 => include_str!("../config/asound.lx06.conf"),
         DeviceModel::Oh2p => include_str!("../config/asound.oh2p.conf"),
@@ -97,8 +98,11 @@ pcm.stereo_interceptor {{
 
 #[cfg(target_os = "linux")]
 fn cleanup_alsa_config() {
-    println!("\nCleaning up ALSA configurations...");
-    let _ = Command::new("umount").arg(REAL_ASOUND_CONF).status();
+    println!("Cleaning up ALSA configurations...");
+    let _ = Command::new("umount")
+        .arg("-l")
+        .arg(REAL_ASOUND_CONF)
+        .status();
     let _ = fs::remove_file(TEMP_ASOUND_CONF);
     let _ = fs::remove_file(FIFO_PATH);
 }
@@ -129,29 +133,22 @@ async fn main() -> Result<()> {
             ChannelRole::Right
         };
 
-        if mode == "master" {
-            let model = detect_model();
-            if model == DeviceModel::Unknown {
-                eprintln!("警告: 无法识别设备型号，尝试使用默认配置");
-            }
-            setup_alsa_config(model)?;
-
-            // 监听退出信号进行清理
-            let result = tokio::select! {
-                res = run_master(role) => res,
-                _ = signal::ctrl_c() => {
-                    println!("收到退出信号");
-                    Ok(())
+        let result = tokio::select! {
+            res = async {
+                if mode == "master" {
+                    run_master(role).await
+                } else {
+                    run_slave(role).await
                 }
-            };
+            } => res,
+            _ = signal::ctrl_c() => {
+                println!("\n收到退出信号");
+                Ok(())
+            }
+        };
 
-            cleanup_alsa_config();
-            return result;
-        } else {
-            run_slave(role).await?;
-        }
-
-        Ok(())
+        cleanup_alsa_config();
+        return result;
     }
 }
 
@@ -165,59 +162,97 @@ async fn run_master(role: ChannelRole) -> Result<()> {
         ..AudioConfig::default()
     };
 
+    let model = detect_model();
+    if model == DeviceModel::Unknown {
+        eprintln!("警告: 无法识别设备型号，尝试使用默认配置");
+    }
+
     println!("--- 主设备模式 ---");
     println!("本地声道: {:?}", role);
-    println!("正在启动发现服务 (UDP Broadcast)...");
 
-    // 1. 启动发现广播
-    let socket = UdpSocket::bind("0.0.0.0:0").await?;
-    socket.set_broadcast(true)?;
-    let target_addr: SocketAddr = format!("255.255.255.255:{}", DISCOVERY_PORT).parse()?;
-    let hello = ControlPacket::ServerHello { port: SERVER_PORT };
-    let msg = postcard::to_allocvec(&hello)?;
+    loop {
+        println!("正在启动发现服务 (UDP Broadcast)...");
+        // 1. 启动发现广播
+        let socket = UdpSocket::bind("0.0.0.0:0").await?;
+        socket.set_broadcast(true)?;
+        let target_addr: SocketAddr = format!("255.255.255.255:{}", DISCOVERY_PORT).parse()?;
+        let hello = ControlPacket::ServerHello { port: SERVER_PORT };
+        let msg = postcard::to_allocvec(&hello)?;
 
-    let broadcast_handle = tokio::spawn(async move {
-        loop {
-            let _ = socket.send_to(&msg, target_addr).await;
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-    });
+        let broadcast_handle = tokio::spawn(async move {
+            loop {
+                let _ = socket.send_to(&msg, target_addr).await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        });
 
-    // 2. 等待从设备连接
-    let listener = TcpListener::bind(format!("0.0.0.0:{}", SERVER_PORT)).await?;
-    println!("等待从设备连接于端口 {}...", SERVER_PORT);
-    let (mut slave_stream, addr) = listener.accept().await?;
-    println!("从设备已连接: {}", addr);
-    broadcast_handle.abort();
+        // 2. 等待从设备连接
+        let listener = TcpListener::bind(format!("0.0.0.0:{}", SERVER_PORT)).await?;
+        println!("等待从设备连接于端口 {}...", SERVER_PORT);
 
-    // 3. 握手与时间同步
-    let mut buf = [0u8; 1024];
-    let n = slave_stream.read(&mut buf).await?;
-    if let Ok(ControlPacket::ClientIdentify { role: slave_role }) =
-        postcard::from_bytes::<ControlPacket>(&buf[..n])
-    {
-        println!("从设备识别为: {:?}", slave_role);
-    }
-
-    let n = slave_stream.read(&mut buf).await?;
-    if let Ok(ControlPacket::Ping { client_ts }) = postcard::from_bytes::<ControlPacket>(&buf[..n])
-    {
-        let pong = ControlPacket::Pong {
-            client_ts,
-            server_ts: now_us(),
+        let (mut slave_stream, addr) = tokio::select! {
+            res = listener.accept() => res?,
+            _ = signal::ctrl_c() => {
+                broadcast_handle.abort();
+                return Ok(());
+            }
         };
-        slave_stream
-            .write_all(&postcard::to_allocvec(&pong)?)
-            .await?;
-        println!("时钟同步完成");
-    }
 
-    // 4. 初始化音频
-    // 打开 FIFO
-    let mut fifo = fs::File::open(FIFO_PATH).context("Failed to open FIFO for reading")?;
+        println!("从设备已连接: {}", addr);
+        broadcast_handle.abort();
+
+        // 3. 握手与时间同步
+        let mut buf = [0u8; 1024];
+        let n = slave_stream.read(&mut buf).await?;
+        if let Ok(ControlPacket::ClientIdentify { role: slave_role }) =
+            postcard::from_bytes::<ControlPacket>(&buf[..n])
+        {
+            println!("从设备识别为: {:?}", slave_role);
+        }
+
+        let n = slave_stream.read(&mut buf).await?;
+        if let Ok(ControlPacket::Ping { client_ts }) =
+            postcard::from_bytes::<ControlPacket>(&buf[..n])
+        {
+            let pong = ControlPacket::Pong {
+                client_ts,
+                server_ts: now_us(),
+            };
+            slave_stream
+                .write_all(&postcard::to_allocvec(&pong)?)
+                .await?;
+            println!("时钟同步完成");
+        }
+
+        // 4. 初始化音频并开始拦截
+        setup_alsa_config(model)?;
+
+        let res = run_master_audio_loop(&mut slave_stream, role.clone(), &config).await;
+
+        cleanup_alsa_config();
+
+        if let Err(e) = res {
+            eprintln!("主设备音频循环出错: {:?}, 准备重连...", e);
+        } else {
+            println!("从设备正常断开，准备下一次连接...");
+        }
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn run_master_audio_loop(
+    slave_stream: &mut TcpStream,
+    role: ChannelRole,
+    config: &AudioConfig,
+) -> Result<()> {
+    // 打开 FIFO (使用 tokio::fs 以支持异步读取)
+    let mut fifo = tokio::fs::File::open(FIFO_PATH)
+        .await
+        .context("Failed to open FIFO for reading")?;
 
     // 使用 plug:original_default 以支持系统主音量控制
-    // 由于我们在拦截器里把 slave 设为了 null，这里播放 original_default 会直接走原来的 softvol -> 硬件
     let playback_config = AudioConfig {
         channels: 1,
         playback_device: "plug:original_default".to_string(),
@@ -234,7 +269,7 @@ async fn run_master(role: ChannelRole) -> Result<()> {
     let mut opus_buf = vec![0u8; 2048];
 
     let delay_us = 100_000; // 100ms 缓冲
-    let mut current_ts = now_us() + delay_us;
+    let mut current_ts = 0;
     let frame_duration =
         (config.frame_size as f64 / config.sample_rate as f64 * 1_000_000.0) as u128;
 
@@ -244,12 +279,17 @@ async fn run_master(role: ChannelRole) -> Result<()> {
 
     loop {
         // 从 FIFO 读取 (这是同步源)
-        if let Err(e) = fifo.read_exact(&mut byte_buf) {
+        if let Err(e) = fifo.read_exact(&mut byte_buf).await {
             if e.kind() == std::io::ErrorKind::UnexpectedEof {
                 tokio::time::sleep(Duration::from_millis(10)).await;
                 continue;
             }
             return Err(e.into());
+        }
+
+        let now = now_us();
+        if current_ts == 0 {
+            current_ts = now + delay_us;
         }
 
         for i in 0..stereo_raw_buf.len() {
@@ -270,8 +310,7 @@ async fn run_master(role: ChannelRole) -> Result<()> {
             }
         }
 
-        // 先发送网络包，再进行本地播放
-        // 这样可以确保远程设备更早收到数据，减少右声道卡顿
+        // 先发送网络包
         let opus_len = codec.encode(&remote_pcm, &mut opus_buf)?;
         let packet = AudioPacket {
             timestamp: current_ts,
@@ -285,23 +324,27 @@ async fn run_master(role: ChannelRole) -> Result<()> {
             .is_err()
             || slave_stream.write_all(&packet_data).await.is_err()
         {
-            println!("从设备断开连接");
-            break;
+            return Err(anyhow::anyhow!("从设备断开连接"));
         }
 
-        // 本地播放 (此操作可能阻塞，但不会影响已发出的网络包)
+        // 本地播放也需要同步
+        let now = now_us();
+        if now < current_ts {
+            let wait = current_ts - now;
+            if wait > 1000 {
+                tokio::time::sleep(Duration::from_micros(wait as u64)).await;
+            }
+        }
         player.write(&local_pcm)?;
 
         current_ts += frame_duration;
 
-        // 漂移校正：如果由于某种原因 current_ts 严重落后于现在时间，进行强制跳跃
+        // 漂移校正
         let now = now_us();
         if now > current_ts + 200_000 {
             current_ts = now + 50_000;
         }
     }
-
-    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -311,50 +354,113 @@ async fn run_slave(role: ChannelRole) -> Result<()> {
         channels: 1,
         frame_size: 960,
         bitrate: 32000,
+        playback_device: "plug:original_default".to_string(),
         ..AudioConfig::default()
     };
+
+    let model = detect_model();
+    if model == DeviceModel::Unknown {
+        eprintln!("警告: 无法识别设备型号，尝试使用默认配置");
+    }
 
     println!("--- 从设备模式 ---");
     println!("本地声道: {:?}", role);
 
-    // 1. 发现主设备
-    println!("正在搜索主设备...");
-    let master_addr = hello::net::Discovery::client_discover_server().await?;
-    println!("发现主设备: {}", master_addr);
+    loop {
+        // 1. 发现主设备
+        println!("正在搜索主设备...");
+        let master_addr = match tokio::select! {
+            addr = hello::net::Discovery::client_discover_server() => addr,
+            _ = signal::ctrl_c() => return Ok(()),
+        } {
+            Ok(addr) => addr,
+            Err(e) => {
+                eprintln!("搜索主设备失败: {:?}, 1秒后重试...", e);
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+        };
 
-    let mut stream = TcpStream::connect(master_addr).await?;
+        println!("发现主设备: {}", master_addr);
+        let mut stream = match TcpStream::connect(master_addr).await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("连接主设备失败: {:?}, 1秒后重试...", e);
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+        };
 
-    // 2. 身份识别
-    stream
-        .write_all(&postcard::to_allocvec(&ControlPacket::ClientIdentify {
-            role: role.clone(),
-        })?)
-        .await?;
+        // 2. 身份识别
+        if let Err(e) = stream
+            .write_all(&postcard::to_allocvec(&ControlPacket::ClientIdentify {
+                role: role.clone(),
+            })?)
+            .await
+        {
+            eprintln!("发送身份识别失败: {:?}, 准备重连...", e);
+            continue;
+        }
 
-    // 3. 时间同步
-    let mut clock = ClockSync::new();
-    let t1 = now_us();
-    stream
-        .write_all(&postcard::to_allocvec(&ControlPacket::Ping {
-            client_ts: t1,
-        })?)
-        .await?;
+        // 3. 时间同步
+        let mut clock = ClockSync::new();
+        let t1 = now_us();
+        if let Err(e) = stream
+            .write_all(&postcard::to_allocvec(&ControlPacket::Ping {
+                client_ts: t1,
+            })?)
+            .await
+        {
+            eprintln!("发送 Ping 失败: {:?}, 准备重连...", e);
+            continue;
+        }
 
-    let mut buf = [0u8; 1024];
-    let n = stream.read(&mut buf).await?;
-    if let Ok(ControlPacket::Pong {
-        client_ts,
-        server_ts,
-    }) = postcard::from_bytes::<ControlPacket>(&buf[..n])
-    {
-        let t4 = now_us();
-        clock.update(client_ts, server_ts, t4);
-        println!("时钟同步完成. 偏移: {}us, RTT: {}us", clock.offset, t4 - t1);
+        let mut buf = [0u8; 1024];
+        let n = match stream.read(&mut buf).await {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("读取 Pong 失败: {:?}, 准备重连...", e);
+                continue;
+            }
+        };
+        if let Ok(ControlPacket::Pong {
+            client_ts,
+            server_ts,
+        }) = postcard::from_bytes::<ControlPacket>(&buf[..n])
+        {
+            let t4 = now_us();
+            clock.update(client_ts, server_ts, t4);
+            println!("时钟同步完成. 偏移: {}us, RTT: {}us", clock.offset, t4 - t1);
+        } else {
+            eprintln!("收到无效的 Pong 响应, 准备重连...");
+            continue;
+        }
+
+        // 4. 初始化音频并开始播放
+        setup_alsa_config(model)?;
+
+        let res = run_slave_audio_loop(stream, &config, clock).await;
+
+        cleanup_alsa_config();
+
+        if let Err(e) = res {
+            eprintln!("从设备音频循环出错: {:?}, 准备重连...", e);
+        } else {
+            println!("主设备已断开，准备重连...");
+        }
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
+}
 
-    // 4. 音频处理
-    let player = AudioPlayer::new(&config).context("无法打开播放设备")?;
-    let mut codec = OpusCodec::new(&config).context("无法初始化解码器")?;
+#[cfg(target_os = "linux")]
+async fn run_slave_audio_loop(
+    stream: TcpStream,
+    config: &AudioConfig,
+    clock: ClockSync,
+) -> Result<()> {
+    let player = AudioPlayer::new(config).context("无法打开播放设备")?;
+    let mut codec = OpusCodec::new(config).context("无法初始化解码器")?;
     let mut jitter_buffer: VecDeque<AudioPacket> = VecDeque::new();
     let mut pcm_buf = vec![0i16; config.frame_size];
 
@@ -362,7 +468,7 @@ async fn run_slave(role: ChannelRole) -> Result<()> {
 
     // 网络接收线程
     let mut stream_read = stream;
-    tokio::spawn(async move {
+    let receive_handle = tokio::spawn(async move {
         loop {
             let mut s_buf = [0u8; 4];
             if stream_read.read_exact(&mut s_buf).await.is_err() {
@@ -374,14 +480,16 @@ async fn run_slave(role: ChannelRole) -> Result<()> {
                 break;
             }
             if let Ok(p) = postcard::from_bytes::<AudioPacket>(&data) {
-                let _ = tx.send(p).await;
+                if tx.send(p).await.is_err() {
+                    break;
+                }
             }
         }
     });
 
     println!("开始接收并播放音频...");
 
-    loop {
+    let res = loop {
         while let Ok(p) = rx.try_recv() {
             jitter_buffer.push_back(p);
         }
@@ -412,7 +520,13 @@ async fn run_slave(role: ChannelRole) -> Result<()> {
                 }
             }
         } else {
+            if receive_handle.is_finished() {
+                break Ok(());
+            }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-    }
+    };
+
+    receive_handle.abort();
+    res
 }
