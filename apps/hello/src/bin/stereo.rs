@@ -1,5 +1,6 @@
+#![cfg(target_os = "linux")]
+
 use anyhow::{Context, Result};
-#[cfg(target_os = "linux")]
 use hello::audio::{AudioPlayer, OpusCodec};
 use hello::config::AudioConfig;
 use hello::net::{AudioPacket, ChannelRole, ControlPacket, DISCOVERY_PORT, SERVER_PORT};
@@ -14,14 +15,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::signal;
 
-#[cfg(target_os = "linux")]
 const FIFO_PATH: &str = "/tmp/stereo_out.fifo";
-#[cfg(target_os = "linux")]
-const TEMP_ASOUND_CONF: &str = "/tmp/asound.stereo.conf";
-#[cfg(target_os = "linux")]
 const REAL_ASOUND_CONF: &str = "/etc/asound.conf";
+const TEMP_ASOUND_CONF: &str = "/tmp/asound.stereo.conf";
 
-#[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum DeviceModel {
     Lx06,
@@ -29,7 +26,6 @@ enum DeviceModel {
     Unknown,
 }
 
-#[cfg(target_os = "linux")]
 fn detect_model() -> DeviceModel {
     let model = Command::new("sh")
         .args(["-c", "micocfg_model"])
@@ -45,7 +41,6 @@ fn detect_model() -> DeviceModel {
     DeviceModel::Unknown
 }
 
-#[cfg(target_os = "linux")]
 fn setup_alsa_config(model: DeviceModel) -> Result<()> {
     cleanup_alsa_config();
 
@@ -89,14 +84,13 @@ pcm.stereo_interceptor {{
         .context("Failed to execute mount command")?;
 
     if !status.success() {
-        return Err(anyhow::anyhow!("Failed to mount asound.conf, need root?"));
+        return Err(anyhow::anyhow!("Failed to mount asound.conf"));
     }
 
     println!("Successfully redirected ALSA output to {}", FIFO_PATH);
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
 fn cleanup_alsa_config() {
     println!("Cleaning up ALSA configurations...");
     let _ = Command::new("umount")
@@ -109,50 +103,40 @@ fn cleanup_alsa_config() {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    #[cfg(not(target_os = "linux"))]
-    {
-        println!("Stereo 模式仅支持 Linux (需要 ALSA)");
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 3 {
+        eprintln!("用法: {} [master|slave] [left|right]", args[0]);
+        eprintln!("示例:");
+        eprintln!("  主设备: {} master left", args[0]);
+        eprintln!("  从设备: {} slave right", args[0]);
         return Ok(());
     }
 
-    #[cfg(target_os = "linux")]
-    {
-        let args: Vec<String> = env::args().collect();
-        if args.len() < 3 {
-            eprintln!("用法: {} [master|slave] [left|right]", args[0]);
-            eprintln!("示例:");
-            eprintln!("  主设备: {} master left", args[0]);
-            eprintln!("  从设备: {} slave right", args[0]);
-            return Ok(());
-        }
+    let mode = &args[1];
+    let role = if args[2].to_lowercase() == "left" {
+        ChannelRole::Left
+    } else {
+        ChannelRole::Right
+    };
 
-        let mode = &args[1];
-        let role = if args[2].to_lowercase() == "left" {
-            ChannelRole::Left
-        } else {
-            ChannelRole::Right
-        };
-
-        let result = tokio::select! {
-            res = async {
-                if mode == "master" {
-                    run_master(role).await
-                } else {
-                    run_slave(role).await
-                }
-            } => res,
-            _ = signal::ctrl_c() => {
-                println!("\n收到退出信号");
-                Ok(())
+    let result = tokio::select! {
+        res = async {
+            if mode == "master" {
+                run_master(role).await
+            } else {
+                run_slave(role).await
             }
-        };
+        } => res,
+        _ = signal::ctrl_c() => {
+            println!("\n收到退出信号");
+            Ok(())
+        }
+    };
 
-        cleanup_alsa_config();
-        return result;
-    }
+    cleanup_alsa_config();
+    return result;
 }
 
-#[cfg(target_os = "linux")]
 async fn run_master(role: ChannelRole) -> Result<()> {
     let config = AudioConfig {
         sample_rate: 48000,
@@ -241,7 +225,6 @@ async fn run_master(role: ChannelRole) -> Result<()> {
     }
 }
 
-#[cfg(target_os = "linux")]
 async fn run_master_audio_loop(
     slave_stream: &mut TcpStream,
     role: ChannelRole,
@@ -347,7 +330,6 @@ async fn run_master_audio_loop(
     }
 }
 
-#[cfg(target_os = "linux")]
 async fn run_slave(role: ChannelRole) -> Result<()> {
     let config = AudioConfig {
         sample_rate: 48000,
@@ -453,7 +435,6 @@ async fn run_slave(role: ChannelRole) -> Result<()> {
     }
 }
 
-#[cfg(target_os = "linux")]
 async fn run_slave_audio_loop(
     stream: TcpStream,
     config: &AudioConfig,
