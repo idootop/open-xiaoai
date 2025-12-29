@@ -307,7 +307,6 @@ async fn run_slave(role: ChannelRole) -> Result<()> {
         channels: 1,
         frame_size: 960,
         bitrate: 32000,
-        playback_device: "plug:original_default".to_string(),
         ..AudioConfig::default()
     };
 
@@ -384,12 +383,7 @@ async fn run_slave(role: ChannelRole) -> Result<()> {
             continue;
         }
 
-        // 4. 初始化音频并开始播放
-        setup_alsa_config()?;
-
         let res = run_slave_audio_loop(stream, &config, clock).await;
-
-        cleanup_alsa_config();
 
         if let Err(e) = res {
             eprintln!("从设备音频循环出错: {:?}, 准备重连...", e);
