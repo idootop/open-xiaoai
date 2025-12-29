@@ -1,8 +1,5 @@
-mod audio;
-mod config;
-
-use crate::audio::{AudioPlayer, AudioRecorder, OpusCodec};
-use crate::config::AudioConfig;
+use hello::audio::{AudioPlayer, AudioRecorder, OpusCodec};
+use hello::config::AudioConfig;
 use anyhow::Result;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};

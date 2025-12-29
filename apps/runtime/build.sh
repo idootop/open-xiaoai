@@ -28,3 +28,6 @@ docker run --rm -v $(pwd)/../hello:/app/hello open-xiaoai-runtime \
 # 5. 上传二进制文件到小爱音箱
 # dd if=apps/hello/target/armv7-unknown-linux-gnueabihf/release/hello \
 # | ssh -o HostKeyAlgorithms=+ssh-rsa root@192.168.31.235 "dd of=/data/hello"
+
+# dd if=apps/hello/target/armv7-unknown-linux-gnueabihf/release/hello \
+# | ssh -o HostKeyAlgorithms=+ssh-rsa root@192.168.31.153 "dd of=/data/hello"
