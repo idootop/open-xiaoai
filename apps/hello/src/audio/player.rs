@@ -1,3 +1,4 @@
+#![cfg(target_os = "linux")]
 use crate::config::AudioConfig;
 use alsa::pcm::{Access, Format, HwParams, PCM};
 use alsa::Direction;

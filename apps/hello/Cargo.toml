@@ -12,7 +12,6 @@ strip = true
 debug = false
 
 [dependencies]
-alsa = "0.11"
 opus = "0.3"
 anyhow = "1.0"
 tokio = { version = "1.47", features = ["full"] }
@@ -22,3 +21,6 @@ postcard = { version = "1.0", features = ["alloc", "use-std"] }
 log = "0.4"
 env_logger = "0.11"
 byteorder = "1.5"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+alsa = "0.11"

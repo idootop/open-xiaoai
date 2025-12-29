@@ -1,3 +1,4 @@
+#![cfg(target_os = "linux")]
 use alsa::pcm::{PCM, HwParams, Format, Access};
 use alsa::Direction;
 use anyhow::{Result, Context};
