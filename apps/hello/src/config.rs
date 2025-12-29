@@ -1,3 +1,4 @@
+#[derive(Debug, Clone)]
 pub struct AudioConfig {
     pub capture_device: String,
     pub playback_device: String,
