@@ -6,6 +6,15 @@ pub enum ChannelRole {
     Right,
 }
 
+impl ChannelRole {
+    pub fn to_string(&self) -> String {
+        match self {
+            ChannelRole::Left => "左声道".to_string(),
+            ChannelRole::Right => "右声道".to_string(),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ControlPacket {
     // 发现协议
@@ -26,7 +35,7 @@ pub enum ControlPacket {
         server_ts: u128,
         seq: u32,
     },
-    // 控制协议
+    // 音量同步
     Volume(u8), // 音量 0-100
 }
 

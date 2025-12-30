@@ -1,7 +1,6 @@
 #![cfg(target_os = "linux")]
 
 use anyhow::Result;
-use hello::stereo_core::alsa::AlsaRedirector;
 use hello::stereo_core::master::run_master;
 use hello::stereo_core::protocol::ChannelRole;
 use hello::stereo_core::slave::run_slave;
@@ -21,9 +20,6 @@ async fn main() -> Result<()> {
     } else {
         ChannelRole::Right
     };
-
-    // 启动前先执行清理，确保环境干净
-    AlsaRedirector::cleanup();
 
     if mode == "master" {
         run_master(role).await

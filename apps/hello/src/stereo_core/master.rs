@@ -1,62 +1,45 @@
 #![cfg(target_os = "linux")]
-use anyhow::Result;
+
 use crate::audio::{AudioPlayer, OpusCodec};
 use crate::config::AudioConfig;
-use std::net::SocketAddr;
+use crate::stereo_core::alsa::AlsaRedirector;
+use crate::stereo_core::discovery::Discovery;
+use crate::stereo_core::network::{ControlConnection, MasterNetwork};
+use crate::stereo_core::protocol::{AudioPacket, ChannelRole, ControlPacket};
+use crate::stereo_core::sync::now_us;
+use anyhow::Result;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use crate::stereo_core::alsa::AlsaRedirector;
-use crate::stereo_core::protocol::{AudioPacket, ChannelRole, ControlPacket};
-use crate::stereo_core::sync::now_us;
 
 pub const SERVER_TCP_PORT: u16 = 53531;
-pub const DISCOVERY_PORT: u16 = 53530;
 
 /// 运行主节点模式
 pub async fn run_master(role: ChannelRole) -> Result<()> {
-    println!("--- 主节点模式 ({:?}) ---", role);
+    println!("--- 主节点模式 ({}) ---", role.to_string());
 
-    // 0. 设置 ALSA 重定向 (在主节点生命周期内持续有效)
+    // 0. 设置 ALSA 重定向
     let _alsa_guard = AlsaRedirector::new()?;
 
     // 1. 设置网络 (UDP + TCP)
-    let udp_socket = UdpSocket::bind("0.0.0.0:0").await?;
-    let udp_port = udp_socket.local_addr()?.port();
-    let udp_socket = Arc::new(udp_socket);
+    let network = MasterNetwork::setup(SERVER_TCP_PORT).await?;
+    let audio_socket = network.audio_socket().clone_inner();
 
-    let listener = TcpListener::bind(format!("0.0.0.0:{}", SERVER_TCP_PORT)).await?;
-
-    // 2. 发现服务
-    let _discovery = tokio::spawn(async move {
-        let socket = UdpSocket::bind("0.0.0.0:0").await.unwrap();
-        socket.set_broadcast(true).unwrap();
-        let target: SocketAddr = format!("255.255.255.255:{}", DISCOVERY_PORT)
-            .parse()
-            .unwrap();
-        let msg = postcard::to_allocvec(&ControlPacket::ServerHello {
-            udp_port: SERVER_TCP_PORT,
-        })
-        .unwrap();
-        loop {
-            let _ = socket.send_to(&msg, target).await;
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-    });
+    // 2. 启动服务发现广播
+    Discovery::start_broadcast(SERVER_TCP_PORT).await?;
 
     println!("正在端口 {} 等待从节点连接...", SERVER_TCP_PORT);
 
     loop {
-        let (socket, addr) = listener.accept().await?;
+        let (control_conn, addr) = network.accept().await?;
         println!("从节点已连接: {}", addr);
 
-        let udp_socket = udp_socket.clone();
+        let audio_socket = audio_socket.clone();
         let role = role.clone();
 
         // 启动会话处理句柄
         tokio::spawn(async move {
-            if let Err(e) = handle_master_session(socket, udp_socket, udp_port, role).await {
+            if let Err(e) = handle_master_session(control_conn, audio_socket, role).await {
                 eprintln!("会话结束: {:?}", e);
             }
         });
@@ -65,28 +48,27 @@ pub async fn run_master(role: ChannelRole) -> Result<()> {
 
 /// 处理主节点与从节点的会话
 async fn handle_master_session(
-    mut tcp: TcpStream,
-    udp: Arc<UdpSocket>,
-    _local_udp_port: u16,
+    mut control: ControlConnection,
+    audio_socket: Arc<tokio::net::UdpSocket>,
     role: ChannelRole,
 ) -> Result<()> {
     let mut buf = [0u8; 1024];
 
     // 握手
-    let len = tcp.read(&mut buf).await?;
-    match postcard::from_bytes::<ControlPacket>(&buf[..len])? {
+    let pkt = control.recv_packet(&mut buf).await?;
+    match pkt {
         ControlPacket::ClientIdentify { role: _r } => {}
         _ => return Err(anyhow::anyhow!("无效的握手协议")),
     };
 
     let hello = ControlPacket::ServerHello {
-        udp_port: udp.local_addr()?.port(),
+        udp_port: audio_socket.local_addr()?.port(),
     };
-    tcp.write_all(&postcard::to_allocvec(&hello)?).await?;
+    control.send_packet(&hello).await?;
 
     // 等待 UDP 打洞/确认
     let mut buf = [0u8; 128];
-    let (_, client_udp_addr) = udp.recv_from(&mut buf).await?;
+    let (_, client_udp_addr) = audio_socket.recv_from(&mut buf).await?;
     println!("从节点 UDP 地址已确认: {}", client_udp_addr);
 
     // 配置音频
@@ -121,10 +103,10 @@ async fn handle_master_session(
     println!("开始会话循环...");
 
     // 分离 TCP 读写，以便在不同任务中使用
-    let (mut tcp_rx, mut tcp_tx) = tcp.into_split();
+    let (mut tcp_rx, mut tcp_tx) = control.split();
     let (stop_tx, mut stop_rx) = tokio::sync::mpsc::channel::<()>(1);
 
-    // 处理来自从节点的控制消息（如 Ping/Pong 进行时间同步）
+    // 处理来自从节点的控制消息
     tokio::spawn(async move {
         let mut buf = [0u8; 1024];
         loop {
@@ -157,8 +139,7 @@ async fn handle_master_session(
     });
 
     loop {
-        // 打开 FIFO。这会阻塞直到有写入者打开它。
-        // 使用 select 以便在等待 FIFO 时如果从节点断开连接可以退出。
+        // 打开 FIFO
         let mut fifo = tokio::select! {
             _ = stop_rx.recv() => {
                 println!("等待 FIFO 时从节点断开连接。");
@@ -172,7 +153,7 @@ async fn handle_master_session(
         let stream_start_seq = seq;
 
         loop {
-            // 从 FIFO 读取，带超时/select 以检查断开连接
+            // 从 FIFO 读取
             let read_res = tokio::select! {
                 _ = stop_rx.recv() => {
                     println!("串流过程中从节点断开连接。");
@@ -219,7 +200,7 @@ async fn handle_master_session(
             };
 
             let bytes = postcard::to_allocvec(&packet)?;
-            if let Err(e) = udp.send_to(&bytes, client_udp_addr).await {
+            if let Err(e) = audio_socket.send_to(&bytes, client_udp_addr).await {
                 eprintln!("UDP 发送错误: {:?}", e);
                 return Err(e.into());
             }
@@ -238,4 +219,3 @@ async fn handle_master_session(
         }
     }
 }
-

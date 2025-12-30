@@ -1,53 +1,45 @@
 #![cfg(target_os = "linux")]
-use anyhow::Result;
+
 use crate::audio::{AudioPlayer, OpusCodec};
 use crate::config::AudioConfig;
+use crate::stereo_core::discovery::Discovery;
+use crate::stereo_core::jitter_buffer::JitterBuffer;
+use crate::stereo_core::network::SlaveNetwork;
+use crate::stereo_core::protocol::{AudioPacket, ChannelRole, ControlPacket};
+use crate::stereo_core::sync::{ClockSync, now_us};
+use anyhow::Result;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::{Mutex, mpsc};
-use crate::stereo_core::jitter_buffer::JitterBuffer;
-use crate::stereo_core::protocol::{AudioPacket, ChannelRole, ControlPacket};
-use crate::stereo_core::sync::{ClockSync, now_us};
-use crate::stereo_core::master::{DISCOVERY_PORT};
 
 /// 运行从节点模式
 pub async fn run_slave(role: ChannelRole) -> Result<()> {
-    println!("--- 从节点模式 ({:?}) ---", role);
+    println!("--- 从节点模式 ({}) ---", role.to_string());
 
     println!("正在扫描主节点...");
-    let udp_disc = UdpSocket::bind(format!("0.0.0.0:{}", DISCOVERY_PORT)).await?;
-    let mut buf = [0u8; 1024];
-    let (len, master_addr) = udp_disc.recv_from(&mut buf).await?;
-
-    let master_tcp_port = match postcard::from_bytes::<ControlPacket>(&buf[..len])? {
-        ControlPacket::ServerHello { udp_port: p } => p,
-        _ => return Err(anyhow::anyhow!("无效的发现数据包")),
-    };
-
-    let master_ip = master_addr.ip();
+    let (master_ip, master_tcp_port) = Discovery::discover_master().await?;
     let master_tcp_addr = format!("{}:{}", master_ip, master_tcp_port);
     println!("在 {} 发现主节点", master_tcp_addr);
 
-    let mut tcp = TcpStream::connect(master_tcp_addr).await?;
+    let network = SlaveNetwork::connect(master_tcp_addr.parse()?).await?;
+    let (mut control, audio) = network.split();
 
     // 身份认证
-    tcp.write_all(&postcard::to_allocvec(&ControlPacket::ClientIdentify {
-        role: role.clone(),
-    })?)
-    .await?;
+    control
+        .send_packet(&ControlPacket::ClientIdentify { role: role.clone() })
+        .await?;
 
-    let len = tcp.read(&mut buf).await?;
-    let server_udp_port = match postcard::from_bytes::<ControlPacket>(&buf[..len])? {
+    let mut buf = [0u8; 1024];
+    let pkt = control.recv_packet(&mut buf).await?;
+    let server_udp_port = match pkt {
         ControlPacket::ServerHello { udp_port } => udp_port,
         _ => return Err(anyhow::anyhow!("应答应为 ServerHello")),
     };
 
     // UDP 打洞以接收音频流
-    let udp = UdpSocket::bind("0.0.0.0:0").await?;
-    let punch_packet = vec![0u8; 1];
-    udp.send_to(&punch_packet, format!("{}:{}", master_ip, server_udp_port))
+    audio
+        .punch(format!("{}:{}", master_ip, server_udp_port).parse()?)
         .await?;
 
     // 音频配置
@@ -65,9 +57,9 @@ pub async fn run_slave(role: ChannelRole) -> Result<()> {
     let clock = ClockSync::new(100);
 
     // 分离读写
-    let (mut tcp_rx, mut tcp_tx) = tcp.into_split();
-    let udp = Arc::new(udp);
-    let udp_rx = udp.clone();
+    let (mut tcp_rx, mut tcp_tx) = control.split();
+    let audio_socket = audio.clone_inner();
+    let udp_rx = audio_socket.clone();
 
     // 定时发送 Ping 进行时间同步
     let _sync_handle = tokio::spawn(async move {
@@ -165,4 +157,3 @@ pub async fn run_slave(role: ChannelRole) -> Result<()> {
         }
     }
 }
-
