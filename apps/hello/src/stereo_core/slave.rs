@@ -58,11 +58,8 @@ async fn handle_connection(role: ChannelRole) -> Result<()> {
 
     // 5. 初始化音频与同步组件
     let config = AudioConfig {
-        sample_rate: 48000,
         channels: 1,
-        frame_size: 960,
-        bitrate: 64000,
-        ..AudioConfig::default()
+        ..AudioConfig::music()
     };
     let player = AudioPlayer::new(&config)?;
     let mut codec = OpusCodec::new(&config)?;
@@ -164,10 +161,17 @@ async fn handle_connection(role: ChannelRole) -> Result<()> {
         let current_server_time = clock.lock().await.to_server_time(now);
 
         if let Some((seq, data)) = jitter.pop_frame(current_server_time) {
-            // 丢失处理 (PLC)
             if let Some(last) = last_seq {
-                if seq > last + 1 {
-                    for _ in 0..(seq - last - 1) {
+                let loss_count = seq.wrapping_sub(last) as i32 - 1;
+                if loss_count > 0 {
+                    // 1. 优先尝试 FEC 恢复最近丢失的那一帧
+                    // Opus 的 FEC 数据存储在当前包(data)中，用于恢复“前一帧”
+                    if let Ok(len) = codec.decode_fec(&data, &mut pcm_buf) {
+                        let _ = player.write(&pcm_buf[..len]);
+                    }
+
+                    // 2. 如果丢包超过 1 帧，剩下的帧只能靠丢包补偿(PLC)
+                    for _ in 0..(loss_count - 1) {
                         if let Ok(len) = codec.decode_loss(&mut pcm_buf) {
                             let _ = player.write(&pcm_buf[..len]);
                         }
@@ -176,6 +180,7 @@ async fn handle_connection(role: ChannelRole) -> Result<()> {
             }
             last_seq = Some(seq);
 
+            // 3. 正常解码当前帧
             let len = codec.decode(&data, &mut pcm_buf)?;
             player.write(&pcm_buf[..len])?;
         } else {

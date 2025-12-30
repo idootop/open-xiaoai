@@ -70,14 +70,12 @@ pub async fn run_master(master_role: ChannelRole) -> Result<()> {
     });
 
     // 4. 音频处理主循环
-    let config = AudioConfig {
-        sample_rate: 48000,
-        channels: 2,
-        frame_size: 960,
-        bitrate: 64000,
-        ..AudioConfig::default()
+    let config = AudioConfig::music();
+    let encode_config = AudioConfig {
+        channels: 1,
+        vbr: true,
+        ..AudioConfig::music()
     };
-
     let mut current_player_channels = 0;
     let mut player: Option<AudioPlayer> = None;
 
@@ -108,14 +106,8 @@ pub async fn run_master(master_role: ChannelRole) -> Result<()> {
             };
 
             // 每个新流开始时，重置编码器状态以避免残留音频导致爆音
-            let mut left_encoder = OpusCodec::new(&AudioConfig {
-                channels: 1,
-                ..config.clone()
-            })?;
-            let mut right_encoder = OpusCodec::new(&AudioConfig {
-                channels: 1,
-                ..config.clone()
-            })?;
+            let mut left_encoder = OpusCodec::new(&encode_config)?;
+            let mut right_encoder = OpusCodec::new(&encode_config)?;
 
             loop {
                 // 从 FIFO 读取
