@@ -8,15 +8,15 @@ pub enum ChannelRole {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ControlPacket {
-    // Discovery
+    // 发现协议
     ServerHello {
-        udp_port: u16, // Port for UDP audio stream
+        udp_port: u16, // UDP 音频流端口
     },
-    // Handshake
+    // 握手协议
     ClientIdentify {
         role: ChannelRole,
     },
-    // Time Sync (Continuous)
+    // 时间同步 (持续进行)
     Ping {
         client_ts: u128,
         seq: u32,
@@ -26,14 +26,13 @@ pub enum ControlPacket {
         server_ts: u128,
         seq: u32,
     },
-    // Control
-    Volume(u8), // 0-100
+    // 控制协议
+    Volume(u8), // 音量 0-100
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AudioPacket {
-    pub seq: u32,        // Sequence number for packet loss detection
-    pub timestamp: u128, // Target playback time (server time)
-    pub data: Vec<u8>,   // Opus encoded data
+    pub seq: u32,        // 序列号，用于丢包检测
+    pub timestamp: u128, // 目标播放时间 (主节点时间)
+    pub data: Vec<u8>,   // Opus 编码数据
 }
-

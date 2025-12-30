@@ -22,6 +22,7 @@ impl Ord for OrderedPacket {
     }
 }
 
+/// 抖动缓冲区，用于处理网络延迟和乱序
 pub struct JitterBuffer {
     buffer: BinaryHeap<OrderedPacket>,
     last_played_seq: Option<u32>,
@@ -38,6 +39,7 @@ impl JitterBuffer {
     }
 
     pub fn push(&mut self, packet: AudioPacket) {
+        // 丢弃已经播放过的数据包
         if let Some(last) = self.last_played_seq {
             if packet.seq <= last {
                 return;
@@ -46,6 +48,7 @@ impl JitterBuffer {
         self.buffer.push(OrderedPacket(packet));
     }
 
+    /// 根据当前时间弹出待播放的帧
     pub fn pop_frame(&mut self, current_time: u128) -> Option<(u32, Vec<u8>)> {
         if let Some(OrderedPacket(pkt)) = self.buffer.peek() {
              if current_time >= pkt.timestamp {
