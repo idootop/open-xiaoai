@@ -35,6 +35,7 @@ upload_to_xiaoai stereo 192.168.31.235 # right
 
 # ubus call mediaplayer player_play_url '{"url":"/data/test.wav","type":1}'
 
+/etc/init.d/pns restart >/dev/null 2>&1
 # /etc/init.d/mediaplayer restart >/dev/null 2>&1
 # /etc/init.d/bluetooth restart >/dev/null 2>&1
 # /etc/init.d/miio  restart >/dev/null 2>&1

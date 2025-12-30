@@ -10,6 +10,7 @@ use crate::stereo_core::sync::now_us;
 use anyhow::{Result, anyhow};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::signal::unix::{SignalKind, signal};
@@ -38,6 +39,7 @@ pub async fn run_master(master_role: ChannelRole) -> Result<()> {
 
     println!("✅ 服务已启动，等待连接...");
 
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
     let slaves = Arc::new(Mutex::new(Vec::<SlaveSession>::new()));
 
     // 3. 启动连接监听任务
@@ -93,8 +95,13 @@ pub async fn run_master(master_role: ChannelRole) -> Result<()> {
     let mut stream_start_ts = 0;
     let mut stream_start_seq = 0;
 
-    let audio_loop = async {
+    let shutdown_flag_clone = shutdown_flag.clone();
+    let audio_loop = async move {
         loop {
+            if shutdown_flag_clone.load(Ordering::Relaxed) {
+                break;
+            }
+
             // 打开 FIFO
             let mut fifo = match tokio::fs::File::open(AlsaRedirector::fifo_path()).await {
                 Ok(f) => f,
@@ -110,6 +117,10 @@ pub async fn run_master(master_role: ChannelRole) -> Result<()> {
             let mut right_encoder = OpusCodec::new(&encode_config)?;
 
             loop {
+                if shutdown_flag_clone.load(Ordering::Relaxed) {
+                    break;
+                }
+
                 // 从 FIFO 读取
                 if let Err(_) = fifo.read_exact(&mut raw_buf).await {
                     break; // FIFO 关闭，重新打开
@@ -211,7 +222,12 @@ pub async fn run_master(master_role: ChannelRole) -> Result<()> {
                         }
                     }
                     if let Some(p) = &player {
-                        p.write(master_pcm)?;
+                        if let Err(_) = p.write(master_pcm) {
+                            // 如果写入失败且正在退出，直接跳出循环
+                            if shutdown_flag_clone.load(Ordering::Relaxed) {
+                                break;
+                            }
+                        }
                     }
                 } else {
                     // 情况 2: 没有从节点，本地立体声播放
@@ -221,7 +237,12 @@ pub async fn run_master(master_role: ChannelRole) -> Result<()> {
                             i16::from_le_bytes([raw_buf[i * 4 + 2], raw_buf[i * 4 + 3]]);
                     }
                     if let Some(p) = &player {
-                        p.write(&pcm_out)?;
+                        if let Err(_) = p.write(&pcm_out) {
+                            // 如果写入失败且正在退出，直接跳出循环
+                            if shutdown_flag_clone.load(Ordering::Relaxed) {
+                                break;
+                            }
+                        }
                     }
                 }
 
@@ -230,8 +251,13 @@ pub async fn run_master(master_role: ChannelRole) -> Result<()> {
 
             // 重置流计时
             stream_start_ts = 0;
+
+            // 如果是因为退出信号而跳出内层循环，也要跳出外层循环
+            if shutdown_flag_clone.load(Ordering::Relaxed) {
+                break;
+            }
         }
-        #[allow(unreachable_code)]
+
         Ok::<(), anyhow::Error>(())
     };
 
@@ -241,7 +267,12 @@ pub async fn run_master(master_role: ChannelRole) -> Result<()> {
                 eprintln!("❌ 音频循环错误: {:?}", e);
             }
         },
-        _ = shutdown_signal() => {},
+        _ = shutdown_signal() => {
+            // 设置退出标志，通知音频循环停止
+            shutdown_flag.store(true, Ordering::Relaxed);
+            // 等待一小段时间让音频循环有机会退出
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        },
     }
 
     // 显式清理
