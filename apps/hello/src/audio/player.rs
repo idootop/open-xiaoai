@@ -50,9 +50,19 @@ fn setup_pcm(pcm: &PCM, sample_rate: u32, channels: u16) -> Result<()> {
     hwp.set_format(Format::s16())?;
     hwp.set_rate(sample_rate, alsa::ValueOr::Nearest)?;
     hwp.set_channels(channels as u32)?;
+
+    // 设置较大的缓冲区以减少由于调度抖动导致的断音
+    // 48000Hz * 0.2s = 9600 samples
+    let buffer_size = (sample_rate as f64 * 0.2) as u32;
+    let period_size = buffer_size / 4;
+    hwp.set_buffer_size_near(buffer_size as alsa::pcm::Frames)?;
+    hwp.set_period_size_near(period_size as alsa::pcm::Frames, alsa::ValueOr::Nearest)?;
+
     pcm.hw_params(&hwp).context("Failed to set HwParams")?;
 
     let swp = pcm.sw_params_current()?;
+    // 设置 start_threshold 为 buffer_size 的一半，确保缓冲区有足够数据再开始播放
+    swp.set_start_threshold(buffer_size as alsa::pcm::Frames / 2)?;
     pcm.sw_params(&swp)?;
     pcm.prepare()?;
     Ok(())

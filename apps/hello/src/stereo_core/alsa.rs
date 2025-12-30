@@ -20,8 +20,8 @@ impl AlsaRedirector {
             // 重命名原有的 default 逻辑，插入拦截器
             let mut new_conf = original_conf.replace("pcm.!default", "pcm.original_default");
             new_conf.push_str(&format!(
-                "\npcm.!default {{ type plug slave.pcm \"stereo_interceptor\" }}\n\
-                 pcm.stereo_interceptor {{ type file slave.pcm \"null\" file \"{}\" format \"raw\" }}\n",
+                "\npcm.!default {{ type plug slave {{ pcm \"stereo_interceptor\" format S16_LE rate 48000 channels 2 }} }}\n\
+                pcm.stereo_interceptor {{ type file slave.pcm \"null\" file \"{}\" format \"raw\" }}\n",
                 FIFO_PATH
             ));
 

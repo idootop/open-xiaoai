@@ -82,6 +82,9 @@ pub async fn run_master(master_role: ChannelRole) -> Result<()> {
     let mut player: Option<AudioPlayer> = None;
 
     let mut raw_buf = vec![0u8; config.frame_size * 2 * 2];
+    let mut pcm_out = vec![0i16; config.frame_size * 2];
+    let mut left_pcm = vec![0i16; config.frame_size];
+    let mut right_pcm = vec![0i16; config.frame_size];
     let mut opus_out = vec![0u8; 1500];
     let mut seq = 0u32;
 
@@ -120,10 +123,13 @@ pub async fn run_master(master_role: ChannelRole) -> Result<()> {
                     break; // FIFO 关闭，重新打开
                 }
 
-                let active_slaves = slaves.lock().await.clone();
+                let active_slaves = {
+                    let s = slaves.lock().await;
+                    if s.is_empty() { None } else { Some(s.clone()) }
+                };
 
                 // 检查是否需要切换播放器模式
-                let target_channels = if active_slaves.is_empty() { 2 } else { 1 };
+                let target_channels = if active_slaves.is_none() { 2 } else { 1 };
                 if player.is_none() || current_player_channels != target_channels {
                     println!(
                         "🔄 切换播放模式: {}",
@@ -148,37 +154,21 @@ pub async fn run_master(master_role: ChannelRole) -> Result<()> {
                     stream_start_seq = seq;
                 }
 
-                if active_slaves.is_empty() {
-                    // 情况 1: 没有从节点，本地立体声播放
-                    let mut pcm = Vec::with_capacity(config.frame_size * 2);
-                    for i in 0..config.frame_size {
-                        let l = i16::from_le_bytes([raw_buf[i * 4], raw_buf[i * 4 + 1]]);
-                        let r = i16::from_le_bytes([raw_buf[i * 4 + 2], raw_buf[i * 4 + 3]]);
-                        pcm.push(l);
-                        pcm.push(r);
-                    }
-                    if let Some(p) = &player {
-                        p.write(&pcm)?;
-                    }
-                } else {
-                    // 情况 2: 有从节点，主从同步
-                    let mut left_pcm = Vec::with_capacity(config.frame_size);
-                    let mut right_pcm = Vec::with_capacity(config.frame_size);
+                // 计算该帧应当播放的基准时间（相对于流开始）
+                let target_ts = stream_start_ts
+                    + ((seq - stream_start_seq) as u128 * frame_duration_us)
+                    + delay_us;
 
+                if let Some(slaves_list) = active_slaves {
+                    // 情况 1: 有从节点，主从同步
                     for i in 0..config.frame_size {
-                        let l = i16::from_le_bytes([raw_buf[i * 4], raw_buf[i * 4 + 1]]);
-                        let r = i16::from_le_bytes([raw_buf[i * 4 + 2], raw_buf[i * 4 + 3]]);
-                        left_pcm.push(l);
-                        right_pcm.push(r);
+                        left_pcm[i] = i16::from_le_bytes([raw_buf[i * 4], raw_buf[i * 4 + 1]]);
+                        right_pcm[i] = i16::from_le_bytes([raw_buf[i * 4 + 2], raw_buf[i * 4 + 3]]);
                     }
-
-                    let target_ts = stream_start_ts
-                        + ((seq - stream_start_seq) as u128 * frame_duration_us)
-                        + delay_us;
 
                     // 1. 检查各声道是否有从节点需要
-                    let needs_left = active_slaves.iter().any(|s| s.role == ChannelRole::Left);
-                    let needs_right = active_slaves.iter().any(|s| s.role == ChannelRole::Right);
+                    let needs_left = slaves_list.iter().any(|s| s.role == ChannelRole::Left);
+                    let needs_right = slaves_list.iter().any(|s| s.role == ChannelRole::Right);
 
                     // 2. 编码需要的声道
                     let mut left_bytes = None;
@@ -205,7 +195,7 @@ pub async fn run_master(master_role: ChannelRole) -> Result<()> {
                     }
 
                     // 3. 发送给对应的从节点
-                    for slave in &active_slaves {
+                    for slave in &slaves_list {
                         let bytes = match slave.role {
                             ChannelRole::Left => left_bytes.as_ref(),
                             ChannelRole::Right => right_bytes.as_ref(),
@@ -215,7 +205,7 @@ pub async fn run_master(master_role: ChannelRole) -> Result<()> {
                         }
                     }
 
-                    // 4. 本地回放同步
+                    // 4. 本地回放
                     let master_pcm = match master_role {
                         ChannelRole::Left => &left_pcm,
                         ChannelRole::Right => &right_pcm,
@@ -230,6 +220,16 @@ pub async fn run_master(master_role: ChannelRole) -> Result<()> {
                     }
                     if let Some(p) = &player {
                         p.write(master_pcm)?;
+                    }
+                } else {
+                    // 情况 2: 没有从节点，本地立体声播放
+                    for i in 0..config.frame_size {
+                        pcm_out[i * 2] = i16::from_le_bytes([raw_buf[i * 4], raw_buf[i * 4 + 1]]);
+                        pcm_out[i * 2 + 1] =
+                            i16::from_le_bytes([raw_buf[i * 4 + 2], raw_buf[i * 4 + 3]]);
+                    }
+                    if let Some(p) = &player {
+                        p.write(&pcm_out)?;
                     }
                 }
 
