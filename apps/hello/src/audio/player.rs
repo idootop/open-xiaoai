@@ -1,7 +1,7 @@
 #![cfg(target_os = "linux")]
 use crate::config::AudioConfig;
-use alsa::pcm::{Access, Format, HwParams, PCM};
 use alsa::Direction;
+use alsa::pcm::{Access, Format, HwParams, PCM};
 use anyhow::{Context, Result};
 
 pub struct AudioPlayer {
@@ -37,6 +37,10 @@ impl AudioPlayer {
                 }
             }
         }
+    }
+
+    pub fn prepare(&self) -> Result<()> {
+        self.pcm.prepare().context("Failed to prepare PCM")
     }
 }
 

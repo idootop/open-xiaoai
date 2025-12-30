@@ -78,15 +78,6 @@ pub async fn run_master(master_role: ChannelRole) -> Result<()> {
         ..AudioConfig::default()
     };
 
-    let mut left_encoder = OpusCodec::new(&AudioConfig {
-        channels: 1,
-        ..config.clone()
-    })?;
-    let mut right_encoder = OpusCodec::new(&AudioConfig {
-        channels: 1,
-        ..config.clone()
-    })?;
-
     let mut current_player_channels = 0;
     let mut player: Option<AudioPlayer> = None;
 
@@ -112,6 +103,16 @@ pub async fn run_master(master_role: ChannelRole) -> Result<()> {
                     continue;
                 }
             };
+
+            // 每个新流开始时，重置编码器状态以避免残留音频导致爆音
+            let mut left_encoder = OpusCodec::new(&AudioConfig {
+                channels: 1,
+                ..config.clone()
+            })?;
+            let mut right_encoder = OpusCodec::new(&AudioConfig {
+                channels: 1,
+                ..config.clone()
+            })?;
 
             loop {
                 // 从 FIFO 读取
@@ -234,7 +235,7 @@ pub async fn run_master(master_role: ChannelRole) -> Result<()> {
 
                 seq += 1;
             }
-            
+
             // 重置流计时
             stream_start_ts = 0;
         }

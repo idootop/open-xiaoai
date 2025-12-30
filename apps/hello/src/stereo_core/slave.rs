@@ -138,6 +138,7 @@ async fn handle_connection(role: ChannelRole) -> Result<()> {
     println!("✅ 主节点已连接，音频串流中...");
     let mut pcm_buf = vec![0i16; config.frame_size];
     let mut last_seq: Option<u32> = None;
+    let mut last_packet_time = now_us();
 
     loop {
         // 检查 TCP 是否已断开
@@ -147,6 +148,15 @@ async fn handle_connection(role: ChannelRole) -> Result<()> {
 
         // 填充 Jitter Buffer
         while let Ok(pkt) = audio_rx.try_recv() {
+            let now = now_us();
+            // 如果超过 500ms 没有收到包，认为是新流开始，重置状态
+            if now - last_packet_time > 500_000 {
+                jitter.clear();
+                last_seq = None;
+                codec = OpusCodec::new(&config)?;
+                let _ = player.prepare();
+            }
+            last_packet_time = now;
             jitter.push(pkt);
         }
 
