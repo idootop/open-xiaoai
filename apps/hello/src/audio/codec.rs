@@ -38,8 +38,8 @@ impl OpusCodec {
 
     // Packet Loss Concealment
     pub fn decode_loss(&mut self, out: &mut [i16]) -> Result<usize> {
-        // Fallback to silence as opus crate 0.3 doesn't expose safe PLC
-        out.fill(0);
-        Ok(out.len())
+        self.decoder
+            .decode(&[], out, false)
+            .context("Opus PLC (decode_loss) failed")
     }
 }
