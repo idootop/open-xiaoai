@@ -78,7 +78,11 @@ pub async fn run_master(master_role: ChannelRole) -> Result<()> {
         ..AudioConfig::default()
     };
 
-    let mut mono_codec = OpusCodec::new(&AudioConfig {
+    let mut left_encoder = OpusCodec::new(&AudioConfig {
+        channels: 1,
+        ..config.clone()
+    })?;
+    let mut right_encoder = OpusCodec::new(&AudioConfig {
         channels: 1,
         ..config.clone()
     })?;
@@ -157,45 +161,65 @@ pub async fn run_master(master_role: ChannelRole) -> Result<()> {
                     }
                 } else {
                     // 情况 2: 有从节点，主从同步
-                    let mut local_pcm = Vec::with_capacity(config.frame_size);
-                    let mut remote_pcm = Vec::with_capacity(config.frame_size);
-
-                    // 提取左右声道 (假设当前逻辑只处理一个从节点的情况，或所有从节点角色一致)
-                    let slave_role = active_slaves[0].role;
+                    let mut left_pcm = Vec::with_capacity(config.frame_size);
+                    let mut right_pcm = Vec::with_capacity(config.frame_size);
 
                     for i in 0..config.frame_size {
                         let l = i16::from_le_bytes([raw_buf[i * 4], raw_buf[i * 4 + 1]]);
                         let r = i16::from_le_bytes([raw_buf[i * 4 + 2], raw_buf[i * 4 + 3]]);
-                        if master_role == ChannelRole::Left {
-                            local_pcm.push(l);
-                        } else {
-                            local_pcm.push(r);
-                        }
-                        if slave_role == ChannelRole::Left {
-                            remote_pcm.push(l);
-                        } else {
-                            remote_pcm.push(r);
-                        }
+                        left_pcm.push(l);
+                        right_pcm.push(r);
                     }
 
-                    // 编码并发送给所有从节点
-                    let len = mono_codec.encode(&remote_pcm, &mut opus_out)?;
                     let target_ts = stream_start_ts
                         + ((seq - stream_start_seq) as u128 * frame_duration_us)
                         + delay_us;
 
-                    let packet = AudioPacket {
-                        seq,
-                        timestamp: target_ts,
-                        data: opus_out[..len].to_vec(),
-                    };
+                    // 1. 检查各声道是否有从节点需要
+                    let needs_left = active_slaves.iter().any(|s| s.role == ChannelRole::Left);
+                    let needs_right = active_slaves.iter().any(|s| s.role == ChannelRole::Right);
 
-                    let bytes = postcard::to_allocvec(&packet)?;
-                    for slave in &active_slaves {
-                        let _ = audio_socket.send_to(&bytes, slave.udp_addr).await;
+                    // 2. 编码需要的声道
+                    let mut left_bytes = None;
+                    let mut right_bytes = None;
+
+                    if needs_left {
+                        let len = left_encoder.encode(&left_pcm, &mut opus_out)?;
+                        let packet = AudioPacket {
+                            seq,
+                            timestamp: target_ts,
+                            data: opus_out[..len].to_vec(),
+                        };
+                        left_bytes = Some(postcard::to_allocvec(&packet)?);
                     }
 
-                    // 本地回放同步
+                    if needs_right {
+                        let len = right_encoder.encode(&right_pcm, &mut opus_out)?;
+                        let packet = AudioPacket {
+                            seq,
+                            timestamp: target_ts,
+                            data: opus_out[..len].to_vec(),
+                        };
+                        right_bytes = Some(postcard::to_allocvec(&packet)?);
+                    }
+
+                    // 3. 发送给对应的从节点
+                    for slave in &active_slaves {
+                        let bytes = match slave.role {
+                            ChannelRole::Left => left_bytes.as_ref(),
+                            ChannelRole::Right => right_bytes.as_ref(),
+                        };
+                        if let Some(b) = bytes {
+                            let _ = audio_socket.send_to(b, slave.udp_addr).await;
+                        }
+                    }
+
+                    // 4. 本地回放同步
+                    let master_pcm = match master_role {
+                        ChannelRole::Left => &left_pcm,
+                        ChannelRole::Right => &right_pcm,
+                    };
+
                     let now = now_us();
                     if now < target_ts {
                         let wait = target_ts - now;
@@ -204,12 +228,13 @@ pub async fn run_master(master_role: ChannelRole) -> Result<()> {
                         }
                     }
                     if let Some(p) = &player {
-                        p.write(&local_pcm)?;
+                        p.write(master_pcm)?;
                     }
                 }
 
                 seq += 1;
             }
+            
             // 重置流计时
             stream_start_ts = 0;
         }
