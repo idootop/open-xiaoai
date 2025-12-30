@@ -14,7 +14,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub const SERVER_TCP_PORT: u16 = 53531;
 
-/// 运行主节点模式
 pub async fn run_master(role: ChannelRole) -> Result<()> {
     println!("--- 主节点模式 ({}) ---", role.to_string());
 
@@ -28,19 +27,21 @@ pub async fn run_master(role: ChannelRole) -> Result<()> {
     // 2. 启动服务发现广播
     Discovery::start_broadcast(SERVER_TCP_PORT).await?;
 
-    println!("正在端口 {} 等待从节点连接...", SERVER_TCP_PORT);
+    println!("✅ 服务已启动，等待连接...");
 
     loop {
-        let (control_conn, addr) = network.accept().await?;
-        println!("从节点已连接: {}", addr);
+        let (control_conn, client_addr) = network.accept().await?;
 
         let audio_socket = audio_socket.clone();
         let role = role.clone();
 
         // 启动会话处理句柄
         tokio::spawn(async move {
-            if let Err(e) = handle_master_session(control_conn, audio_socket, role).await {
-                eprintln!("会话结束: {:?}", e);
+            if let Err(e) =
+                handle_master_session(control_conn, audio_socket, role, client_addr.to_string())
+                    .await
+            {
+                eprintln!("❌ {:?}", e);
             }
         });
     }
@@ -50,14 +51,18 @@ pub async fn run_master(role: ChannelRole) -> Result<()> {
 async fn handle_master_session(
     mut control: ControlConnection,
     audio_socket: Arc<tokio::net::UdpSocket>,
-    role: ChannelRole,
+    master_role: ChannelRole,
+    client_tcp_addr: String,
 ) -> Result<()> {
     let mut buf = [0u8; 1024];
+
+    #[allow(unused_assignments)]
+    let mut slave_role = ChannelRole::Left;
 
     // 握手
     let pkt = control.recv_packet(&mut buf).await?;
     match pkt {
-        ControlPacket::ClientIdentify { role: _r } => {}
+        ControlPacket::ClientIdentify { role } => slave_role = role,
         _ => return Err(anyhow::anyhow!("无效的握手协议")),
     };
 
@@ -69,7 +74,12 @@ async fn handle_master_session(
     // 等待 UDP 打洞/确认
     let mut buf = [0u8; 128];
     let (_, client_udp_addr) = audio_socket.recv_from(&mut buf).await?;
-    println!("从节点 UDP 地址已确认: {}", client_udp_addr);
+
+    println!(
+        "✅ 从节点已连接: {} {}",
+        client_tcp_addr,
+        slave_role.to_string(),
+    );
 
     // 配置音频
     let config = AudioConfig {
@@ -96,11 +106,9 @@ async fn handle_master_session(
     let mut opus_out = vec![0u8; 1500];
     let mut seq = 0u32;
 
+    let delay_us = 200_000; // 200ms 延迟，确保主从节点音频同步
     let frame_duration_us =
         (config.frame_size as f64 / config.sample_rate as f64 * 1_000_000.0) as u128;
-    let delay_us = 200_000;
-
-    println!("开始会话循环...");
 
     // 分离 TCP 读写，以便在不同任务中使用
     let (mut tcp_rx, mut tcp_tx) = control.split();
@@ -113,6 +121,11 @@ async fn handle_master_session(
             match tcp_rx.read(&mut buf).await {
                 Ok(0) | Err(_) => {
                     let _ = stop_tx.send(()).await;
+                    println!(
+                        "❌ 从节点已断开: {} {}",
+                        client_tcp_addr,
+                        slave_role.to_string(),
+                    );
                     break;
                 }
                 Ok(n) => {
@@ -141,29 +154,22 @@ async fn handle_master_session(
     loop {
         // 打开 FIFO
         let mut fifo = tokio::select! {
-            _ = stop_rx.recv() => {
-                println!("等待 FIFO 时从节点断开连接。");
-                return Ok(());
-            }
+            _ = stop_rx.recv() => return Ok(()),
             f = tokio::fs::File::open(AlsaRedirector::fifo_path()) => f?,
         };
 
-        println!("音频流已启动...");
         let mut stream_start_ts = 0;
         let stream_start_seq = seq;
 
         loop {
             // 从 FIFO 读取
             let read_res = tokio::select! {
-                _ = stop_rx.recv() => {
-                    println!("串流过程中从节点断开连接。");
-                    return Ok(());
-                }
+                _ = stop_rx.recv() => return Ok(()),
                 res = fifo.read_exact(&mut raw_buf) => res,
             };
 
             if let Err(_) = read_res {
-                println!("音频流结束 (FIFO 读取完毕)。");
+                // todo 继续等待音频流继续播放
                 break;
             }
 
@@ -179,12 +185,15 @@ async fn handle_master_session(
             for i in 0..config.frame_size {
                 let l = i16::from_le_bytes([raw_buf[i * 4], raw_buf[i * 4 + 1]]);
                 let r = i16::from_le_bytes([raw_buf[i * 4 + 2], raw_buf[i * 4 + 3]]);
-                if role == ChannelRole::Left {
+                if master_role == ChannelRole::Left {
                     local_pcm.push(l);
-                    remote_pcm.push(r);
                 } else {
                     local_pcm.push(r);
+                }
+                if slave_role == ChannelRole::Left {
                     remote_pcm.push(l);
+                } else {
+                    remote_pcm.push(r);
                 }
             }
 
@@ -201,8 +210,7 @@ async fn handle_master_session(
 
             let bytes = postcard::to_allocvec(&packet)?;
             if let Err(e) = audio_socket.send_to(&bytes, client_udp_addr).await {
-                eprintln!("UDP 发送错误: {:?}", e);
-                return Err(e.into());
+                return Err(anyhow::anyhow!("UDP 发送错误: {:?}", e));
             }
 
             // 本地回放同步

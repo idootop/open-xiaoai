@@ -19,24 +19,23 @@ pub async fn run_slave(role: ChannelRole) -> Result<()> {
 
     loop {
         match handle_connection(role.clone()).await {
-            Ok(_) => println!("连接正常结束，正在尝试重新连接..."),
             Err(e) => {
-                eprintln!("连接异常断开 3 秒后重试... \nError: {:?}.", e);
+                eprintln!("❌ {:?}", e);
                 tokio::time::sleep(Duration::from_secs(3)).await;
             }
+            Ok(_) => {}
         }
     }
 }
 
-/// 处理单次完整的连接生命周期
 async fn handle_connection(role: ChannelRole) -> Result<()> {
-    println!("正在扫描主节点...");
     // 1. 发现主节点
+    println!("🔍 正在扫描主节点...");
     let (master_ip, master_tcp_port) = Discovery::discover_master().await?;
     let master_tcp_addr = format!("{}:{}", master_ip, master_tcp_port);
-    println!("在 {} 发现主节点，正在连接...", master_tcp_addr);
 
     // 2. 建立 TCP 连接
+    println!("🔥 发现主节点: {}", master_tcp_addr);
     let network = SlaveNetwork::connect(master_tcp_addr.parse()?).await?;
     let (mut control, audio) = network.split();
 
@@ -49,7 +48,7 @@ async fn handle_connection(role: ChannelRole) -> Result<()> {
     let pkt = control.recv_packet(&mut buf).await?;
     let server_udp_port = match pkt {
         ControlPacket::ServerHello { udp_port } => udp_port,
-        _ => return Err(anyhow!("应答应为 ServerHello")),
+        _ => return Err(anyhow!("身份认证应答异常")),
     };
 
     // 4. UDP 打洞
@@ -136,14 +135,14 @@ async fn handle_connection(role: ChannelRole) -> Result<()> {
     });
 
     // 8. 播放主循环
-    println!("连接成功，正在播放音频...");
+    println!("✅ 主节点已连接，音频串流中...");
     let mut pcm_buf = vec![0i16; config.frame_size];
     let mut last_seq: Option<u32> = None;
 
     loop {
         // 检查 TCP 是否已断开
         if let Ok(_) = disconnect_rx.try_recv() {
-            return Err(anyhow!("主节点连接已断开 (TCP Disconnected)"));
+            return Err(anyhow!("主节点已断开: {}", master_tcp_addr));
         }
 
         // 填充 Jitter Buffer
@@ -170,7 +169,7 @@ async fn handle_connection(role: ChannelRole) -> Result<()> {
             let len = codec.decode(&data, &mut pcm_buf)?;
             player.write(&pcm_buf[..len])?;
         } else {
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
     }
 }

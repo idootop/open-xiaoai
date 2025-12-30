@@ -44,7 +44,7 @@ impl AlsaRedirector {
         let _ = Command::new("mkfifo").arg(FIFO_PATH).status();
         let _ = Command::new("chmod").arg("666").arg(FIFO_PATH).status();
 
-        println!("ALSA 输出已重定向至 {}", FIFO_PATH);
+        // println!("ALSA 输出已重定向至 {}", FIFO_PATH);
         Ok(Self)
     }
 
@@ -55,7 +55,7 @@ impl AlsaRedirector {
             .status();
         let _ = fs::remove_file(TEMP_ASOUND_CONF);
         let _ = fs::remove_file(FIFO_PATH);
-        println!("ALSA 配置已恢复。");
+        // println!("ALSA 配置已恢复。");
     }
 
     pub fn fifo_path() -> &'static str {
