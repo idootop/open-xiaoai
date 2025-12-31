@@ -70,7 +70,7 @@ impl Mixer {
             if clients.is_empty() {
                 drop(clients);
                 // 没有客户端时，稍微等待，避免空转
-                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
                 continue;
             }
 
@@ -117,7 +117,7 @@ impl Mixer {
             } else {
                 // 如果所有客户端都断开了，继续等待新连接
                 drop(clients);
-                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
             }
         }
     }
