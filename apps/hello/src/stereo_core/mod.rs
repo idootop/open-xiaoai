@@ -1,9 +1,7 @@
 pub mod alsa;
 pub mod discovery;
-pub mod injector;
 pub mod jitter_buffer;
 pub mod master;
-pub mod mixer;
 pub mod network;
 pub mod protocol;
 pub mod slave;

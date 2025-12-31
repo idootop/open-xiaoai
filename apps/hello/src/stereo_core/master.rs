@@ -4,7 +4,6 @@ use crate::audio::{AudioPlayer, OpusCodec};
 use crate::config::AudioConfig;
 use crate::stereo_core::alsa::AlsaRedirector;
 use crate::stereo_core::discovery::Discovery;
-use crate::stereo_core::mixer::Mixer;
 use crate::stereo_core::network::{ControlConnection, MasterNetwork};
 use crate::stereo_core::protocol::{AudioPacket, ChannelRole, ControlPacket};
 use crate::stereo_core::sync::now_us;
@@ -30,10 +29,6 @@ pub async fn run_master(master_role: ChannelRole) -> Result<()> {
 
     // 0. 设置 ALSA 重定向
     let _alsa_guard = AlsaRedirector::new()?;
-
-    // 0.1 启动混音器服务
-    let mixer = Arc::new(Mixer::new());
-    mixer.start().await?;
 
     // 1. 设置网络 (UDP + TCP)
     let network = MasterNetwork::setup(SERVER_TCP_PORT).await?;
@@ -86,6 +81,8 @@ pub async fn run_master(master_role: ChannelRole) -> Result<()> {
     let mut current_player_channels = 0;
     let mut player: Option<AudioPlayer> = None;
 
+    let mut raw_buf = vec![0u8; config.frame_size * 2 * 2];
+    let mut pcm_out = vec![0i16; config.frame_size * 2];
     let mut left_pcm = vec![0i16; config.frame_size];
     let mut right_pcm = vec![0i16; config.frame_size];
     let mut opus_out = vec![0u8; 1500];
@@ -100,140 +97,165 @@ pub async fn run_master(master_role: ChannelRole) -> Result<()> {
 
     let shutdown_flag_clone = shutdown_flag.clone();
     let audio_loop = async move {
-        // 每个新流开始时，重置编码器状态以避免残留音频导致爆音
-        let mut left_encoder = OpusCodec::new(&encode_config)?;
-        let mut right_encoder = OpusCodec::new(&encode_config)?;
-
         loop {
             if shutdown_flag_clone.load(Ordering::Relaxed) {
                 break;
             }
 
-            // 如果当前没有客户端，重置流计时，以便新客户端连接时重新同步
-            if mixer.client_count().await == 0 {
-                stream_start_ts = 0;
-            }
-
-            // 从混音器读取一帧 (48kHz, 2ch, 20ms)
-            let mixed_pcm = mixer
-                .read_mixed_frame(config.frame_size, config.channels as usize)
-                .await;
-
-            let active_slaves = {
-                let s = slaves.lock().await;
-                if s.is_empty() { None } else { Some(s.clone()) }
+            // 打开 FIFO
+            let mut fifo = match tokio::fs::File::open(AlsaRedirector::fifo_path()).await {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("❌ 无法打开 FIFO: {:?}, 重试...", e);
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
             };
 
-            // 检查是否需要切换播放器模式
-            let target_channels = if active_slaves.is_none() { 2 } else { 1 };
-            if player.is_none() || current_player_channels != target_channels {
-                println!(
-                    "🔄 切换播放模式: {}",
-                    if target_channels == 2 {
-                        "本地立体声"
-                    } else {
-                        "主从同步 (单声道)"
-                    }
-                );
-                let playback_config = AudioConfig {
-                    channels: target_channels,
-                    playback_device: "plug:original_default".into(),
-                    ..config.clone()
+            // 每个新流开始时，重置编码器状态以避免残留音频导致爆音
+            let mut left_encoder = OpusCodec::new(&encode_config)?;
+            let mut right_encoder = OpusCodec::new(&encode_config)?;
+
+            loop {
+                if shutdown_flag_clone.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                // 从 FIFO 读取
+                if let Err(_) = fifo.read_exact(&mut raw_buf).await {
+                    break; // FIFO 关闭，重新打开
+                }
+
+                let active_slaves = {
+                    let s = slaves.lock().await;
+                    if s.is_empty() { None } else { Some(s.clone()) }
                 };
-                player = Some(AudioPlayer::new(&playback_config)?);
-                current_player_channels = target_channels;
-            }
 
-            let now = now_us();
-            if stream_start_ts == 0 {
-                stream_start_ts = now;
-                stream_start_seq = seq;
-            }
-
-            // 计算该帧应当播放的基准时间（相对于流开始）
-            let target_ts =
-                stream_start_ts + ((seq - stream_start_seq) as u128 * frame_duration_us) + delay_us;
-
-            if let Some(slaves_list) = active_slaves {
-                // 情况 1: 有从节点，主从同步
-                for i in 0..config.frame_size {
-                    left_pcm[i] = mixed_pcm[i * 2];
-                    right_pcm[i] = mixed_pcm[i * 2 + 1];
-                }
-
-                // 1. 检查各声道是否有从节点需要
-                let needs_left = slaves_list.iter().any(|s| s.role == ChannelRole::Left);
-                let needs_right = slaves_list.iter().any(|s| s.role == ChannelRole::Right);
-
-                // 2. 编码需要的声道
-                let mut left_bytes = None;
-                let mut right_bytes = None;
-
-                if needs_left {
-                    let len = left_encoder.encode(&left_pcm, &mut opus_out)?;
-                    let packet = AudioPacket {
-                        seq,
-                        timestamp: target_ts,
-                        data: opus_out[..len].to_vec(),
+                // 检查是否需要切换播放器模式
+                let target_channels = if active_slaves.is_none() { 2 } else { 1 };
+                if player.is_none() || current_player_channels != target_channels {
+                    println!(
+                        "🔄 切换播放模式: {}",
+                        if target_channels == 2 {
+                            "本地立体声"
+                        } else {
+                            "主从同步 (单声道)"
+                        }
+                    );
+                    let playback_config = AudioConfig {
+                        channels: target_channels,
+                        playback_device: "plug:original_default".into(),
+                        ..config.clone()
                     };
-                    left_bytes = Some(postcard::to_allocvec(&packet)?);
+                    player = Some(AudioPlayer::new(&playback_config)?);
+                    current_player_channels = target_channels;
                 }
-
-                if needs_right {
-                    let len = right_encoder.encode(&right_pcm, &mut opus_out)?;
-                    let packet = AudioPacket {
-                        seq,
-                        timestamp: target_ts,
-                        data: opus_out[..len].to_vec(),
-                    };
-                    right_bytes = Some(postcard::to_allocvec(&packet)?);
-                }
-
-                // 3. 发送给对应的从节点
-                for slave in &slaves_list {
-                    let bytes = match slave.role {
-                        ChannelRole::Left => left_bytes.as_ref(),
-                        ChannelRole::Right => right_bytes.as_ref(),
-                    };
-                    if let Some(b) = bytes {
-                        let _ = audio_socket.send_to(b, slave.udp_addr).await;
-                    }
-                }
-
-                // 4. 本地回放
-                let master_pcm = match master_role {
-                    ChannelRole::Left => &left_pcm,
-                    ChannelRole::Right => &right_pcm,
-                };
 
                 let now = now_us();
-                if now < target_ts {
-                    let wait = target_ts - now;
-                    if wait > 1000 {
-                        tokio::time::sleep(Duration::from_micros(wait as u64)).await;
-                    }
+                if stream_start_ts == 0 {
+                    stream_start_ts = now;
+                    stream_start_seq = seq;
                 }
-                if let Some(p) = &player {
-                    if let Err(_) = p.write(master_pcm) {
-                        // 如果写入失败且正在退出，直接跳出循环
-                        if shutdown_flag_clone.load(Ordering::Relaxed) {
-                            break;
+
+                // 计算该帧应当播放的基准时间（相对于流开始）
+                let target_ts = stream_start_ts
+                    + ((seq - stream_start_seq) as u128 * frame_duration_us)
+                    + delay_us;
+
+                if let Some(slaves_list) = active_slaves {
+                    // 情况 1: 有从节点，主从同步
+                    for i in 0..config.frame_size {
+                        left_pcm[i] = i16::from_le_bytes([raw_buf[i * 4], raw_buf[i * 4 + 1]]);
+                        right_pcm[i] = i16::from_le_bytes([raw_buf[i * 4 + 2], raw_buf[i * 4 + 3]]);
+                    }
+
+                    // 1. 检查各声道是否有从节点需要
+                    let needs_left = slaves_list.iter().any(|s| s.role == ChannelRole::Left);
+                    let needs_right = slaves_list.iter().any(|s| s.role == ChannelRole::Right);
+
+                    // 2. 编码需要的声道
+                    let mut left_bytes = None;
+                    let mut right_bytes = None;
+
+                    if needs_left {
+                        let len = left_encoder.encode(&left_pcm, &mut opus_out)?;
+                        let packet = AudioPacket {
+                            seq,
+                            timestamp: target_ts,
+                            data: opus_out[..len].to_vec(),
+                        };
+                        left_bytes = Some(postcard::to_allocvec(&packet)?);
+                    }
+
+                    if needs_right {
+                        let len = right_encoder.encode(&right_pcm, &mut opus_out)?;
+                        let packet = AudioPacket {
+                            seq,
+                            timestamp: target_ts,
+                            data: opus_out[..len].to_vec(),
+                        };
+                        right_bytes = Some(postcard::to_allocvec(&packet)?);
+                    }
+
+                    // 3. 发送给对应的从节点
+                    for slave in &slaves_list {
+                        let bytes = match slave.role {
+                            ChannelRole::Left => left_bytes.as_ref(),
+                            ChannelRole::Right => right_bytes.as_ref(),
+                        };
+                        if let Some(b) = bytes {
+                            let _ = audio_socket.send_to(b, slave.udp_addr).await;
+                        }
+                    }
+
+                    // 4. 本地回放
+                    let master_pcm = match master_role {
+                        ChannelRole::Left => &left_pcm,
+                        ChannelRole::Right => &right_pcm,
+                    };
+
+                    let now = now_us();
+                    if now < target_ts {
+                        let wait = target_ts - now;
+                        if wait > 1000 {
+                            tokio::time::sleep(Duration::from_micros(wait as u64)).await;
+                        }
+                    }
+                    if let Some(p) = &player {
+                        if let Err(_) = p.write(master_pcm) {
+                            // 如果写入失败且正在退出，直接跳出循环
+                            if shutdown_flag_clone.load(Ordering::Relaxed) {
+                                break;
+                            }
+                        }
+                    }
+                } else {
+                    // 情况 2: 没有从节点，本地立体声播放
+                    for i in 0..config.frame_size {
+                        pcm_out[i * 2] = i16::from_le_bytes([raw_buf[i * 4], raw_buf[i * 4 + 1]]);
+                        pcm_out[i * 2 + 1] =
+                            i16::from_le_bytes([raw_buf[i * 4 + 2], raw_buf[i * 4 + 3]]);
+                    }
+                    if let Some(p) = &player {
+                        if let Err(_) = p.write(&pcm_out) {
+                            // 如果写入失败且正在退出，直接跳出循环
+                            if shutdown_flag_clone.load(Ordering::Relaxed) {
+                                break;
+                            }
                         }
                     }
                 }
-            } else {
-                // 情况 2: 没有从节点，本地立体声播放
-                if let Some(p) = &player {
-                    if let Err(_) = p.write(&mixed_pcm) {
-                        // 如果写入失败且正在退出，直接跳出循环
-                        if shutdown_flag_clone.load(Ordering::Relaxed) {
-                            break;
-                        }
-                    }
-                }
+
+                seq += 1;
             }
 
-            seq += 1;
+            // 重置流计时
+            stream_start_ts = 0;
+
+            // 如果是因为退出信号而跳出内层循环，也要跳出外层循环
+            if shutdown_flag_clone.load(Ordering::Relaxed) {
+                break;
+            }
         }
 
         Ok::<(), anyhow::Error>(())
