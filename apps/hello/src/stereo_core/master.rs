@@ -28,6 +28,7 @@ pub async fn run_master(master_role: ChannelRole) -> Result<()> {
     println!("--- 主节点模式 ({}) ---", master_role.to_string());
 
     // 0. 设置 ALSA 重定向
+    println!("🔥 启动中，请稍等...");
     let _alsa_guard = AlsaRedirector::new()?;
 
     // 1. 设置网络 (UDP + TCP)
@@ -78,8 +79,11 @@ pub async fn run_master(master_role: ChannelRole) -> Result<()> {
         vbr: true,
         ..AudioConfig::music()
     };
-    let mut current_player_channels = 0;
-    let mut player: Option<AudioPlayer> = None;
+    let player = AudioPlayer::new(&AudioConfig {
+        channels: 2,
+        playback_device: "plug:original_default".into(),
+        ..config.clone()
+    })?;
 
     let mut raw_buf = vec![0u8; config.frame_size * 2 * 2];
     let mut pcm_out = vec![0i16; config.frame_size * 2];
@@ -105,8 +109,10 @@ pub async fn run_master(master_role: ChannelRole) -> Result<()> {
             // 打开 FIFO
             let mut fifo = match tokio::fs::File::open(AlsaRedirector::fifo_path()).await {
                 Ok(f) => f,
-                Err(e) => {
-                    eprintln!("❌ 无法打开 FIFO: {:?}, 重试...", e);
+                Err(_) => {
+                    if shutdown_flag_clone.load(Ordering::Relaxed) {
+                        break;
+                    }
                     tokio::time::sleep(Duration::from_secs(1)).await;
                     continue;
                 }
@@ -131,26 +137,6 @@ pub async fn run_master(master_role: ChannelRole) -> Result<()> {
                     if s.is_empty() { None } else { Some(s.clone()) }
                 };
 
-                // 检查是否需要切换播放器模式
-                let target_channels = if active_slaves.is_none() { 2 } else { 1 };
-                if player.is_none() || current_player_channels != target_channels {
-                    println!(
-                        "🔄 切换播放模式: {}",
-                        if target_channels == 2 {
-                            "本地立体声"
-                        } else {
-                            "主从同步 (单声道)"
-                        }
-                    );
-                    let playback_config = AudioConfig {
-                        channels: target_channels,
-                        playback_device: "plug:original_default".into(),
-                        ..config.clone()
-                    };
-                    player = Some(AudioPlayer::new(&playback_config)?);
-                    current_player_channels = target_channels;
-                }
-
                 let now = now_us();
                 if stream_start_ts == 0 {
                     stream_start_ts = now;
@@ -162,12 +148,14 @@ pub async fn run_master(master_role: ChannelRole) -> Result<()> {
                     + ((seq - stream_start_seq) as u128 * frame_duration_us)
                     + delay_us;
 
+                // 提取 PCM 数据
+                for i in 0..config.frame_size {
+                    left_pcm[i] = i16::from_le_bytes([raw_buf[i * 4], raw_buf[i * 4 + 1]]);
+                    right_pcm[i] = i16::from_le_bytes([raw_buf[i * 4 + 2], raw_buf[i * 4 + 3]]);
+                }
+
                 if let Some(slaves_list) = active_slaves {
-                    // 情况 1: 有从节点，主从同步
-                    for i in 0..config.frame_size {
-                        left_pcm[i] = i16::from_le_bytes([raw_buf[i * 4], raw_buf[i * 4 + 1]]);
-                        right_pcm[i] = i16::from_le_bytes([raw_buf[i * 4 + 2], raw_buf[i * 4 + 3]]);
-                    }
+                    // 情况 1: 有从节点，进行网络传输，并本地构造静音声道回放
 
                     // 1. 检查各声道是否有从节点需要
                     let needs_left = slaves_list.iter().any(|s| s.role == ChannelRole::Left);
@@ -208,12 +196,21 @@ pub async fn run_master(master_role: ChannelRole) -> Result<()> {
                         }
                     }
 
-                    // 4. 本地回放
-                    let master_pcm = match master_role {
-                        ChannelRole::Left => &left_pcm,
-                        ChannelRole::Right => &right_pcm,
-                    };
+                    // 4. 将非本节点的声道置为静音
+                    for i in 0..config.frame_size {
+                        match master_role {
+                            ChannelRole::Left => {
+                                pcm_out[i * 2] = left_pcm[i];
+                                pcm_out[i * 2 + 1] = 0;
+                            }
+                            ChannelRole::Right => {
+                                pcm_out[i * 2] = 0;
+                                pcm_out[i * 2 + 1] = right_pcm[i];
+                            }
+                        }
+                    }
 
+                    // 5. 等待播放
                     let now = now_us();
                     if now < target_ts {
                         let wait = target_ts - now;
@@ -221,28 +218,18 @@ pub async fn run_master(master_role: ChannelRole) -> Result<()> {
                             tokio::time::sleep(Duration::from_micros(wait as u64)).await;
                         }
                     }
-                    if let Some(p) = &player {
-                        if let Err(_) = p.write(master_pcm) {
-                            // 如果写入失败且正在退出，直接跳出循环
-                            if shutdown_flag_clone.load(Ordering::Relaxed) {
-                                break;
-                            }
-                        }
-                    }
                 } else {
                     // 情况 2: 没有从节点，本地立体声播放
                     for i in 0..config.frame_size {
-                        pcm_out[i * 2] = i16::from_le_bytes([raw_buf[i * 4], raw_buf[i * 4 + 1]]);
-                        pcm_out[i * 2 + 1] =
-                            i16::from_le_bytes([raw_buf[i * 4 + 2], raw_buf[i * 4 + 3]]);
+                        pcm_out[i * 2] = left_pcm[i];
+                        pcm_out[i * 2 + 1] = right_pcm[i];
                     }
-                    if let Some(p) = &player {
-                        if let Err(_) = p.write(&pcm_out) {
-                            // 如果写入失败且正在退出，直接跳出循环
-                            if shutdown_flag_clone.load(Ordering::Relaxed) {
-                                break;
-                            }
-                        }
+                }
+
+                // 统一写入播放器 (始终是立体声)
+                if let Err(_) = player.write(&pcm_out) {
+                    if shutdown_flag_clone.load(Ordering::Relaxed) {
+                        break;
                     }
                 }
 
@@ -251,11 +238,6 @@ pub async fn run_master(master_role: ChannelRole) -> Result<()> {
 
             // 重置流计时
             stream_start_ts = 0;
-
-            // 如果是因为退出信号而跳出内层循环，也要跳出外层循环
-            if shutdown_flag_clone.load(Ordering::Relaxed) {
-                break;
-            }
         }
 
         Ok::<(), anyhow::Error>(())
@@ -270,12 +252,11 @@ pub async fn run_master(master_role: ChannelRole) -> Result<()> {
         _ = shutdown_signal() => {
             // 设置退出标志，通知音频循环停止
             shutdown_flag.store(true, Ordering::Relaxed);
-            // 等待一小段时间让音频循环有机会退出
-            tokio::time::sleep(Duration::from_millis(100)).await;
         },
     }
 
     // 显式清理
+    println!("👋 正在退出...");
     AlsaRedirector::cleanup();
 
     // 强制退出

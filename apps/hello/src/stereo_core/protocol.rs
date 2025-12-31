@@ -35,8 +35,6 @@ pub enum ControlPacket {
         server_ts: u128,
         seq: u32,
     },
-    // 音量同步
-    Volume(u8), // 音量 0-100
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

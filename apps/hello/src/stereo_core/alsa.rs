@@ -38,13 +38,14 @@ impl AlsaRedirector {
             if !status.success() {
                 return Err(anyhow::anyhow!("挂载 asound.conf 失败"));
             }
+
+            Self::restart_applications();
         }
 
         // 创建 FIFO 管道
         let _ = Command::new("mkfifo").arg(FIFO_PATH).status();
         let _ = Command::new("chmod").arg("666").arg(FIFO_PATH).status();
 
-        // println!("ALSA 输出已重定向至 {}", FIFO_PATH);
         Ok(Self)
     }
 
@@ -55,16 +56,23 @@ impl AlsaRedirector {
             .status();
         let _ = fs::remove_file(TEMP_ASOUND_CONF);
         let _ = fs::remove_file(FIFO_PATH);
-        // println!("ALSA 配置已恢复。");
+        Self::restart_applications();
     }
 
     pub fn fifo_path() -> &'static str {
         FIFO_PATH
     }
-}
 
-impl Drop for AlsaRedirector {
-    fn drop(&mut self) {
-        Self::cleanup();
+    pub fn restart_applications() {
+        // 重启媒体播放器
+        let _ = Command::new("sh")
+            .arg("-c")
+            .arg("/etc/init.d/mediaplayer restart >/dev/null 2>&1")
+            .status();
+        // 重启蓝牙
+        let _ = Command::new("sh")
+            .arg("-c")
+            .arg("/etc/init.d/bluetooth restart >/dev/null 2>&1")
+            .status();
     }
 }
