@@ -1,0 +1,22 @@
+[package]
+name = "stereo"
+version = "0.1.0"
+edition = "2024"
+
+[profile.release]
+lto = true
+opt-level = "s"
+codegen-units = 1
+panic = "abort"
+strip = true
+debug = false
+
+[dependencies]
+opus = "0.3"
+anyhow = "1.0"
+tokio = { version = "1.48", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+postcard = { version = "1.0", features = ["alloc", "use-std"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+alsa = "0.11"
