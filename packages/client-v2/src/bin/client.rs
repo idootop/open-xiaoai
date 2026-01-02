@@ -1,10 +1,9 @@
-use anyhow::Result;
+use xiao::app::client::Client;
+use std::sync::Arc;
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    #[cfg(feature = "app")]
-    {
-        xiao::app::client::entry::run_client().await?;
-    }
+async fn main() -> anyhow::Result<()> {
+    let client = Arc::new(Client::new());
+    client.run().await?;
     Ok(())
 }

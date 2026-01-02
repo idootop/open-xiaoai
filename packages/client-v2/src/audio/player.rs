@@ -11,61 +11,38 @@ pub struct AudioPlayer {
 
 impl AudioPlayer {
     pub fn new(config: &AudioConfig) -> Result<Self> {
-        let pcm = PCM::new(&config.playback_device, Direction::Playback, false)
-            .context("Failed to open playback PCM device")?;
+        let pcm = PCM::new(&config.playback_device, Direction::Playback, false)?;
+        {
+            let hwp = HwParams::any(&pcm)?;
+            hwp.set_access(Access::RWInterleaved)?;
+            hwp.set_format(Format::s16())?;
+            hwp.set_rate_near(config.sample_rate, alsa::ValueOr::Nearest)?;
+            hwp.set_channels_near(config.channels as u32)?;
 
-        setup_pcm(&pcm, config.sample_rate, config.channels)?;
+            // 100ms buffer to prevent underruns
+            let buffer_size = (config.sample_rate as f64 * 0.1) as u32;
+            hwp.set_buffer_size_near(buffer_size as alsa::pcm::Frames)?;
+
+            pcm.hw_params(&hwp)?;
+        }
+        pcm.prepare()?;
         Ok(Self { pcm })
     }
 
-    pub fn write(&self, buffer: &[i16]) -> Result<usize> {
-        let res = self.pcm.io_i16()?.writei(buffer);
-
+    pub fn write(&self, buf: &[i16]) -> Result<usize> {
+        let res = self.pcm.io_i16()?.writei(buf);
         match res {
-            Ok(written) => Ok(written),
-            Err(e) => {
-                // Buffer Underrun，即播放缓冲区的数据被耗尽，导致音频流中断
-                if e.errno() == 32 {
-                    // 恢复音频流状态
-                    self.pcm.prepare()?;
-                    // 重新获取 IO 对象并尝试写入数据
-                    self.pcm
-                        .io_i16()?
-                        .writei(buffer)
-                        .context("Failed to write to playback device after recovery")
-                } else {
-                    Err(e).context("Failed to write to playback device")
-                }
+            Ok(n) => Ok(n),
+            Err(e) if e.errno() == 32 => {
+                println!("ALSA write underrun, preparing PCM");
+                // Broken pipe (underrun)
+                self.pcm.prepare()?;
+                self.pcm
+                    .io_i16()?
+                    .writei(buf)
+                    .context("ALSA write retry failed")
             }
+            Err(e) => Err(e.into()),
         }
     }
-
-    pub fn prepare(&self) -> Result<()> {
-        self.pcm.prepare().context("Failed to prepare PCM")
-    }
-}
-
-fn setup_pcm(pcm: &PCM, sample_rate: u32, channels: u16) -> Result<()> {
-    let hwp = HwParams::any(pcm).context("Failed to get HwParams")?;
-    hwp.set_access(Access::RWInterleaved)?;
-    hwp.set_format(Format::s16())?;
-    hwp.set_rate(sample_rate, alsa::ValueOr::Nearest)?;
-    hwp.set_channels(channels as u32)?;
-
-    // 设置较大的缓冲区以减少由于调度抖动和设备重初始化导致的断音/卡顿
-    // 使用 100ms 缓冲区，既能防止 underrun，又不会引入过大延迟
-    let buffer_size = (sample_rate as f64 * 0.1) as u32; // 100ms 缓冲
-    let period_size = buffer_size / 4; // 25ms 周期
-    hwp.set_buffer_size_near(buffer_size as alsa::pcm::Frames)?;
-    hwp.set_period_size_near(period_size as alsa::pcm::Frames, alsa::ValueOr::Nearest)?;
-
-    pcm.hw_params(&hwp).context("Failed to set HwParams")?;
-
-    let swp = pcm.sw_params_current()?;
-    // 设置 start_threshold，当缓冲区有 1 个 period 数据时就开始播放
-    // 这样可以快速启动，同时保持足够的缓冲余量
-    swp.set_start_threshold(period_size as alsa::pcm::Frames)?;
-    pcm.sw_params(&swp)?;
-    pcm.prepare()?;
-    Ok(())
 }

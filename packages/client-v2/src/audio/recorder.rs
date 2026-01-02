@@ -11,31 +11,32 @@ pub struct AudioRecorder {
 
 impl AudioRecorder {
     pub fn new(config: &AudioConfig) -> Result<Self> {
-        let pcm = PCM::new(&config.capture_device, Direction::Capture, false)
-            .context("Failed to open capture PCM device")?;
-
-        setup_pcm(&pcm, config.sample_rate, config.channels)?;
+        let pcm = PCM::new(&config.capture_device, Direction::Capture, false)?;
+        {
+            let hwp = HwParams::any(&pcm)?;
+            hwp.set_access(Access::RWInterleaved)?;
+            hwp.set_format(Format::s16())?;
+            hwp.set_rate_near(config.sample_rate, alsa::ValueOr::Nearest)?;
+            hwp.set_channels_near(config.channels as u32)?;
+            pcm.hw_params(&hwp)?;
+        }
+        pcm.prepare()?;
         Ok(Self { pcm })
     }
 
-    pub fn read(&self, buffer: &mut [i16]) -> Result<usize> {
-        self.pcm
-            .io_i16()?
-            .readi(buffer)
-            .context("Failed to read from capture device")
+    pub fn read(&self, buf: &mut [i16]) -> Result<usize> {
+        match self.pcm.io_i16()?.readi(buf) {
+            Ok(n) => Ok(n),
+            Err(e) if e.errno() == 32 => {
+                // 32 = Broken pipe (Overrun)
+                println!("ALSA recording overrun, recovering...");
+                self.pcm.prepare()?;
+                self.pcm
+                    .io_i16()?
+                    .readi(buf)
+                    .context("ALSA read retry failed")
+            }
+            Err(e) => Err(e.into()),
+        }
     }
-}
-
-fn setup_pcm(pcm: &PCM, sample_rate: u32, channels: u16) -> Result<()> {
-    let hwp = HwParams::any(pcm).context("Failed to get HwParams")?;
-    hwp.set_access(Access::RWInterleaved)?;
-    hwp.set_format(Format::s16())?;
-    hwp.set_rate(sample_rate, alsa::ValueOr::Nearest)?;
-    hwp.set_channels(channels as u32)?;
-    pcm.hw_params(&hwp).context("Failed to set HwParams")?;
-
-    let swp = pcm.sw_params_current()?;
-    pcm.sw_params(&swp)?;
-    pcm.prepare()?;
-    Ok(())
 }

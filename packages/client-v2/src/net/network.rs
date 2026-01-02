@@ -1,13 +1,61 @@
 use crate::net::protocol::{AudioPacket, ControlPacket};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::net::{TcpStream, UdpSocket};
+use tokio::sync::Mutex;
 
-/// UDP 音频传输
-// ... (rest of AudioSocket is same)
+pub struct NetConfig {
+    pub tcp_port: u16,
+    pub udp_port: u16,
+}
+
+/// A unified control connection over TCP
+pub struct Connection {
+    reader: Mutex<tokio::net::tcp::OwnedReadHalf>,
+    writer: Mutex<tokio::net::tcp::OwnedWriteHalf>,
+    peer_addr: SocketAddr,
+}
+
+impl Connection {
+    pub fn new(stream: TcpStream) -> Result<Self> {
+        let peer_addr = stream.peer_addr()?;
+        let (r, w) = stream.into_split();
+        Ok(Self {
+            reader: Mutex::new(r),
+            writer: Mutex::new(w),
+            peer_addr,
+        })
+    }
+
+    pub async fn send(&self, packet: &ControlPacket) -> Result<()> {
+        let bytes = postcard::to_allocvec(packet)?;
+        let mut writer = self.writer.lock().await;
+        writer.write_u32(bytes.len() as u32).await?;
+        writer.write_all(&bytes).await?;
+        writer.flush().await?;
+        Ok(())
+    }
+
+    pub async fn recv(&self) -> Result<ControlPacket> {
+        let mut reader = self.reader.lock().await;
+        let len = reader.read_u32().await? as usize;
+        if len > 1024 * 1024 {
+            return Err(anyhow::anyhow!("Packet too large: {}", len));
+        }
+        let mut buf = vec![0u8; len];
+        reader.read_exact(&mut buf).await?;
+        let packet = postcard::from_bytes(&buf)?;
+        Ok(packet)
+    }
+
+    pub fn peer_addr(&self) -> SocketAddr {
+        self.peer_addr
+    }
+}
+
+/// UDP Socket for audio transmission
 pub struct AudioSocket {
     socket: Arc<UdpSocket>,
 }
@@ -20,140 +68,19 @@ impl AudioSocket {
         })
     }
 
-    pub fn local_port(&self) -> Result<u16> {
-        Ok(self.socket.local_addr()?.port())
+    pub fn port(&self) -> u16 {
+        self.socket.local_addr().unwrap().port()
     }
 
-    pub async fn send_packet(&self, packet: &AudioPacket, target: SocketAddr) -> Result<()> {
+    pub async fn send(&self, packet: &AudioPacket, target: SocketAddr) -> Result<()> {
         let bytes = postcard::to_allocvec(packet)?;
         self.socket.send_to(&bytes, target).await?;
         Ok(())
     }
 
-    pub async fn recv_packet(&self, buf: &mut [u8]) -> Result<(AudioPacket, SocketAddr)> {
+    pub async fn recv(&self, buf: &mut [u8]) -> Result<(AudioPacket, SocketAddr)> {
         let (len, addr) = self.socket.recv_from(buf).await?;
         let packet = postcard::from_bytes(&buf[..len])?;
         Ok((packet, addr))
-    }
-
-    pub fn clone_inner(&self) -> Arc<UdpSocket> {
-        self.socket.clone()
-    }
-}
-
-/// TCP 控制连接读取端
-pub struct ControlReader {
-    reader: OwnedReadHalf,
-}
-
-impl ControlReader {
-    pub async fn recv_packet(&mut self) -> Result<ControlPacket> {
-        let len = self.reader.read_u32().await? as usize;
-        if len > 10 * 1024 * 1024 {
-            return Err(anyhow::anyhow!("Packet too large: {}", len));
-        }
-        let mut buf = vec![0u8; len];
-        self.reader.read_exact(&mut buf).await?;
-        let packet = postcard::from_bytes(&buf)?;
-        Ok(packet)
-    }
-}
-
-/// TCP 控制连接写入端
-pub struct ControlWriter {
-    writer: OwnedWriteHalf,
-}
-
-impl ControlWriter {
-    pub async fn send_packet(&mut self, packet: &ControlPacket) -> Result<()> {
-        let bytes = postcard::to_allocvec(packet)?;
-        let len = bytes.len() as u32;
-        self.writer.write_u32(len).await?;
-        self.writer.write_all(&bytes).await?;
-        self.writer.flush().await?;
-        Ok(())
-    }
-}
-
-/// TCP 控制连接
-pub struct ControlConnection {
-    stream: TcpStream,
-}
-
-impl ControlConnection {
-    pub fn new(stream: TcpStream) -> Self {
-        Self { stream }
-    }
-
-    pub async fn send_packet(&mut self, packet: &ControlPacket) -> Result<()> {
-        let bytes = postcard::to_allocvec(packet)?;
-        let len = bytes.len() as u32;
-        self.stream.write_u32(len).await?;
-        self.stream.write_all(&bytes).await?;
-        self.stream.flush().await?;
-        Ok(())
-    }
-
-    pub async fn recv_packet(&mut self) -> Result<ControlPacket> {
-        let len = self.stream.read_u32().await? as usize;
-        if len > 10 * 1024 * 1024 {
-            return Err(anyhow::anyhow!("Packet too large: {}", len));
-        }
-        let mut buf = vec![0u8; len];
-        self.stream.read_exact(&mut buf).await?;
-        let packet = postcard::from_bytes(&buf)?;
-        Ok(packet)
-    }
-
-    pub fn split(self) -> (ControlReader, ControlWriter) {
-        let (r, w) = self.stream.into_split();
-        (ControlReader { reader: r }, ControlWriter { writer: w })
-    }
-
-    pub fn peer_addr(&self) -> Result<SocketAddr> {
-        self.stream.peer_addr().context("Failed to get peer addr")
-    }
-}
-
-/// 服务端网络管理器
-pub struct ServerNetwork {
-    listener: TcpListener,
-}
-
-impl ServerNetwork {
-    pub async fn setup(port: u16) -> Result<Self> {
-        let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
-        Ok(Self { listener })
-    }
-
-    pub async fn accept(&self) -> Result<(ControlConnection, SocketAddr)> {
-        let (stream, addr) = self.listener.accept().await?;
-        Ok((ControlConnection::new(stream), addr))
-    }
-
-    pub fn local_addr(&self) -> Result<SocketAddr> {
-        self.listener
-            .local_addr()
-            .context("Failed to get local addr")
-    }
-}
-
-/// 客户端网络管理器
-pub struct ClientNetwork {
-    control: ControlConnection,
-}
-
-impl ClientNetwork {
-    pub async fn connect(server_addr: SocketAddr) -> Result<Self> {
-        let stream = TcpStream::connect(server_addr)
-            .await
-            .context(format!("无法连接到服务端 TCP 地址: {}", server_addr))?;
-        Ok(Self {
-            control: ControlConnection::new(stream),
-        })
-    }
-
-    pub fn into_control(self) -> ControlConnection {
-        self.control
     }
 }

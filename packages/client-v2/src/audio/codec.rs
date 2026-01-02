@@ -9,62 +9,67 @@ pub struct OpusCodec {
 
 impl OpusCodec {
     pub fn new(config: &AudioConfig) -> Result<Self> {
+        // Opus 仅支持这些采样率，强制进行转换以防万一
+        let opus_rate = match config.sample_rate {
+            8000 => 8000,
+            12000 => 12000,
+            16000 => 16000,
+            24000 => 24000,
+            48000 => 48000,
+            _ => {
+                let fallback = if config.sample_rate < 24000 {
+                    16000
+                } else {
+                    48000
+                };
+                println!(
+                    "Warning: Opus does not support {}Hz, falling back to {}Hz",
+                    config.sample_rate, fallback
+                );
+                fallback
+            }
+        };
+
         let channels = match config.channels {
             1 => Channels::Mono,
             2 => Channels::Stereo,
-            _ => return Err(anyhow::anyhow!("Invalid channels: {}", config.channels)),
+            _ => return Err(anyhow::anyhow!("Unsupported channels: {}", config.channels)),
         };
+
         let mode = match config.audio_scene {
             AudioScene::Music => Application::Audio,
             AudioScene::Voice => Application::Voip,
         };
-        let bitrate = match config.bitrate {
-            -1 => Bitrate::Max,
-            0 => Bitrate::Auto,
-            _ => Bitrate::Bits(config.bitrate),
+
+        let mut encoder =
+            Encoder::new(opus_rate, channels, mode).context("Opus encoder init failed")?;
+
+        let bitrate = if config.bitrate <= 0 {
+            Bitrate::Auto
+        } else {
+            Bitrate::Bits(config.bitrate)
         };
 
-        let mut encoder = Encoder::new(config.sample_rate, channels, mode)
-            .context("Failed to create Opus encoder")?;
-
         encoder.set_bitrate(bitrate)?;
-        if config.vbr {
-            encoder.set_vbr(true)?;
-        }
+        encoder.set_vbr(config.vbr)?;
         if config.fec {
-            encoder.set_inband_fec(true)?; // 内联前向纠错
-            encoder.set_packet_loss_perc(20)?; // 预期丢包率20%
+            encoder.set_inband_fec(true)?;
+            encoder.set_packet_loss_perc(10)?;
         }
 
         let decoder =
-            Decoder::new(config.sample_rate, channels).context("Failed to create Opus decoder")?;
+            Decoder::new(config.sample_rate, channels).context("Opus decoder init failed")?;
 
         Ok(Self { encoder, decoder })
     }
 
     pub fn encode(&mut self, pcm: &[i16], out: &mut [u8]) -> Result<usize> {
-        self.encoder
-            .encode(pcm, out)
-            .context("Opus encoding failed")
+        self.encoder.encode(pcm, out).context("Opus encode failed")
     }
 
     pub fn decode(&mut self, opus: &[u8], out: &mut [i16]) -> Result<usize> {
         self.decoder
             .decode(opus, out, false)
-            .context("Opus decoding failed")
-    }
-
-    /// 前向纠错(FEC)
-    pub fn decode_fec(&mut self, opus: &[u8], out: &mut [i16]) -> Result<usize> {
-        self.decoder
-            .decode(opus, out, true)
-            .context("Opus FEC decoding failed")
-    }
-
-    /// 丢包补偿(PLC)
-    pub fn decode_loss(&mut self, out: &mut [i16]) -> Result<usize> {
-        self.decoder
-            .decode(&[], out, false)
-            .context("Opus PLC (decode_loss) failed")
+            .context("Opus decode failed")
     }
 }

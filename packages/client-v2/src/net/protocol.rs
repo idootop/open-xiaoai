@@ -8,19 +8,31 @@ pub struct DeviceInfo {
     pub version: u32,
 }
 
+impl DeviceInfo {
+    pub fn current() -> Self {
+        Self {
+            model: "Open-XiaoAi-V2".to_string(),
+            mac: "00:00:00:00:00:00".to_string(), // TODO: Get actual MAC
+            version: 1,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ControlPacket {
-    // 服务发现
+    // Discovery
     ServerHello {
         tcp_port: u16,
+        udp_port: u16,
     },
-    // 握手与认证
+    // Handshake
     ClientIdentify {
         info: DeviceInfo,
+        udp_port: u16,
     },
     IdentifyOk,
 
-    // 音频控制
+    // Audio Control
     StartRecording {
         config: AudioConfig,
     },
@@ -41,12 +53,12 @@ pub enum ControlPacket {
         result: RpcResult,
     },
 
-    // 心跳
+    // Heartbeat
     Ping,
     Pong,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct RpcResult {
     pub stdout: String,
     pub stderr: String,
@@ -55,5 +67,5 @@ pub struct RpcResult {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AudioPacket {
-    pub data: Vec<u8>, // Opus 编码数据
+    pub data: Vec<u8>,
 }

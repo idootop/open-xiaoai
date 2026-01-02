@@ -17,14 +17,14 @@ impl RpcManager {
         }
     }
 
-    pub fn alloc_id(&self) -> (u32, oneshot::Receiver<RpcResult>) {
+    pub fn register(&self) -> (u32, oneshot::Receiver<RpcResult>) {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().insert(id, tx);
         (id, rx)
     }
 
-    pub fn fulfill(&self, id: u32, result: RpcResult) {
+    pub fn resolve(&self, id: u32, result: RpcResult) {
         if let Some(tx) = self.pending.lock().remove(&id) {
             let _ = tx.send(result);
         }

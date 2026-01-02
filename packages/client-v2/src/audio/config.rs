@@ -8,56 +8,49 @@ pub enum AudioScene {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioConfig {
-    // ALSA 设备参数，用于录音和播放
     pub capture_device: String,
     pub playback_device: String,
     pub sample_rate: u32,
     pub channels: u16,
-    pub frame_size: usize, // 帧大小，单位为采样点
-
-    // Opus 编解码参数，用于音频传输
+    pub frame_size: usize,
     pub audio_scene: AudioScene,
     pub bitrate: i32,
-    pub vbr: bool, // 是否启用 VBR（动态比特率）
-    pub fec: bool, // 是否启用 FEC（内联前向纠错）
+    pub vbr: bool,
+    pub fec: bool,
 }
 
 impl AudioConfig {
-    pub fn music() -> Self {
+    pub fn voice_16k() -> Self {
         Self {
-            audio_scene: AudioScene::Music,
-            sample_rate: 48_000, // 48kHz
-            channels: 2,
-            frame_size: 960,  // 20ms at 48kHz
-            bitrate: 320_000, // 320 kbps
-            ..Default::default()
+            capture_device: "plug:Capture".to_string(),
+            playback_device: "plug:default".to_string(),
+            sample_rate: 16_000,
+            channels: 1,
+            frame_size: 320, // 20ms
+            audio_scene: AudioScene::Voice,
+            bitrate: 32_000,
+            vbr: true,
+            fec: true,
         }
     }
 
-    pub fn voice() -> Self {
+    pub fn music_48k() -> Self {
         Self {
-            audio_scene: AudioScene::Voice,
-            sample_rate: 16_000, // 16kHz
-            channels: 1,
-            frame_size: 320, // 20ms at 16kHz
-            bitrate: 32_000, // 32 kbps
-            ..Default::default()
+            capture_device: "plug:Capture".to_string(),
+            playback_device: "plug:default".to_string(),
+            sample_rate: 48_000,
+            channels: 2,
+            frame_size: 960, // 20ms
+            audio_scene: AudioScene::Music,
+            bitrate: 128_000,
+            vbr: true,
+            fec: true,
         }
     }
 }
 
 impl Default for AudioConfig {
     fn default() -> Self {
-        Self {
-            audio_scene: AudioScene::Voice,
-            capture_device: "plug:Capture".to_string(),
-            playback_device: "default".to_string(),
-            sample_rate: 16_000,
-            channels: 1,
-            frame_size: 320, // 20ms at 16kHz
-            bitrate: 32_000,
-            vbr: false,
-            fec: false,
-        }
+        Self::voice_16k()
     }
 }
