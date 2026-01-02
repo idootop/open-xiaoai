@@ -5,6 +5,7 @@ use std::time::Duration;
 use tokio::net::UdpSocket;
 
 pub const DISCOVERY_PORT: u16 = 53530;
+const DISCOVERY_MAGIC: &[u8] = b"STEREO_DISCOVERY_V1";
 
 /// 服务发现模块，用于主从节点的自动发现
 pub struct Discovery;
@@ -16,7 +17,9 @@ impl Discovery {
         socket.set_broadcast(true)?;
 
         let target: SocketAddr = format!("255.255.255.255:{}", DISCOVERY_PORT).parse()?;
-        let msg = postcard::to_allocvec(&ControlPacket::ServerHello { udp_port: tcp_port })?;
+
+        let mut msg = DISCOVERY_MAGIC.to_vec();
+        msg.extend(postcard::to_allocvec(&ControlPacket::ServerHello { udp_port: tcp_port })?);
 
         tokio::spawn(async move {
             loop {
@@ -35,10 +38,12 @@ impl Discovery {
 
         loop {
             let (len, addr) = socket.recv_from(&mut buf).await?;
-            if let Ok(ControlPacket::ServerHello { udp_port }) =
-                postcard::from_bytes::<ControlPacket>(&buf[..len])
-            {
-                return Ok((addr.ip(), udp_port));
+            let data = &buf[..len];
+            if data.starts_with(DISCOVERY_MAGIC) {
+                let packet_data = &data[DISCOVERY_MAGIC.len()..];
+                if let Ok(ControlPacket::ServerHello { udp_port }) = postcard::from_bytes(packet_data) {
+                    return Ok((addr.ip(), udp_port));
+                }
             }
         }
     }
