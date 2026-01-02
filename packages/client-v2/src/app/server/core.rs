@@ -1,53 +1,19 @@
+use crate::app::server::handlers;
+use crate::app::server::session::ServerSession;
 use crate::audio::codec::OpusCodec;
 use crate::audio::config::AudioConfig;
 use crate::audio::wav::{WavReader, WavWriter};
 use crate::net::discovery::Discovery;
 use crate::net::network::{AudioSocket, ControlConnection, ServerNetwork};
-use crate::net::protocol::{AudioPacket, ControlPacket, DeviceInfo, RpcResult};
+use crate::net::protocol::{AudioPacket, ControlPacket, RpcResult};
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
-use tokio::sync::{broadcast, oneshot};
-
-pub struct RpcManager {
-    next_id: AtomicU32,
-    pending: Mutex<HashMap<u32, oneshot::Sender<RpcResult>>>,
-}
-
-impl RpcManager {
-    pub fn new() -> Self {
-        Self {
-            next_id: AtomicU32::new(1),
-            pending: Mutex::new(HashMap::new()),
-        }
-    }
-
-    pub fn alloc_id(&self) -> (u32, oneshot::Receiver<RpcResult>) {
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let (tx, rx) = oneshot::channel();
-        self.pending.lock().insert(id, tx);
-        (id, rx)
-    }
-
-    pub fn fulfill(&self, id: u32, result: RpcResult) {
-        if let Some(tx) = self.pending.lock().remove(&id) {
-            let _ = tx.send(result);
-        }
-    }
-}
-
-pub struct Session {
-    pub info: DeviceInfo,
-    pub control: Arc<tokio::sync::Mutex<ControlConnection>>,
-    pub addr: SocketAddr,
-    pub rpc: Arc<RpcManager>,
-}
 
 pub struct Server {
-    sessions: Arc<Mutex<HashMap<SocketAddr, Arc<Session>>>>,
+    sessions: Arc<Mutex<HashMap<SocketAddr, Arc<ServerSession>>>>,
     audio_socket: Arc<AudioSocket>,
 }
 
@@ -98,36 +64,20 @@ impl Server {
         );
         control.send_packet(&ControlPacket::IdentifyOk).await?;
 
-        let rpc = Arc::new(RpcManager::new());
-        let control = Arc::new(tokio::sync::Mutex::new(control));
-        let session = Arc::new(Session {
-            info,
-            control: control.clone(),
-            addr,
-            rpc: rpc.clone(),
-        });
+        let (mut reader, writer) = control.split();
+        let session = Arc::new(ServerSession::new(info, writer, addr));
 
         self.sessions.lock().insert(addr, session.clone());
 
         // 处理控制消息循环
         loop {
-            let mut ctrl = control.lock().await;
-            let packet = ctrl.recv_packet().await?;
-            drop(ctrl); // 释放锁以允许发送
-
-            match packet {
-                ControlPacket::RpcResponse { id, result } => {
-                    rpc.fulfill(id, result);
+            let packet = reader.recv_packet().await?;
+            let session = session.clone();
+            tokio::spawn(async move {
+                if let Err(e) = handlers::handle_packet(session, packet).await {
+                    eprintln!("处理来自 {} 的包时出错: {}", addr, e);
                 }
-                ControlPacket::Ping => {
-                    control
-                        .lock()
-                        .await
-                        .send_packet(&ControlPacket::Pong)
-                        .await?;
-                }
-                _ => {}
-            }
+            });
         }
     }
 
@@ -141,7 +91,7 @@ impl Server {
             .context("未找到 Session")?;
         let (id, rx) = session.rpc.alloc_id();
         session
-            .control
+            .writer
             .lock()
             .await
             .send_packet(&ControlPacket::RpcRequest {
@@ -163,7 +113,7 @@ impl Server {
 
         // 发送开始录音指令
         session
-            .control
+            .writer
             .lock()
             .await
             .send_packet(&ControlPacket::StartRecording {
@@ -189,7 +139,7 @@ impl Server {
             .cloned()
             .context("未找到 Session")?;
         session
-            .control
+            .writer
             .lock()
             .await
             .send_packet(&ControlPacket::StopRecording)
@@ -206,7 +156,7 @@ impl Server {
             .context("未找到 Session")?;
 
         session
-            .control
+            .writer
             .lock()
             .await
             .send_packet(&ControlPacket::StartPlayback {
@@ -233,7 +183,7 @@ impl Server {
             .cloned()
             .context("未找到 Session")?;
         session
-            .control
+            .writer
             .lock()
             .await
             .send_packet(&ControlPacket::StopPlayback)
@@ -259,8 +209,6 @@ async fn save_audio_to_wav(
 
     println!("正在录制到 {}...", path);
 
-    // 这里需要一个停止机制，目前简单起见，如果一段时间没收到包就停止，或者通过全局状态
-    // 为简单演示，我们录制 100 个包
     for _ in 0..100 {
         let (packet, _) = socket.recv_packet(&mut udp_buf).await?;
         let pcm_len = codec.decode(&packet.data, &mut pcm_buf)?;
@@ -296,7 +244,6 @@ async fn stream_wav_to_client(
         };
         socket.send_packet(&packet, target).await?;
 
-        // 控制发送频率，约 20ms 一帧
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 

@@ -3,9 +3,11 @@ use anyhow::{Context, Result};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
 /// UDP 音频传输
+// ... (rest of AudioSocket is same)
 pub struct AudioSocket {
     socket: Arc<UdpSocket>,
 }
@@ -39,6 +41,40 @@ impl AudioSocket {
     }
 }
 
+/// TCP 控制连接读取端
+pub struct ControlReader {
+    reader: OwnedReadHalf,
+}
+
+impl ControlReader {
+    pub async fn recv_packet(&mut self) -> Result<ControlPacket> {
+        let len = self.reader.read_u32().await? as usize;
+        if len > 10 * 1024 * 1024 {
+            return Err(anyhow::anyhow!("Packet too large: {}", len));
+        }
+        let mut buf = vec![0u8; len];
+        self.reader.read_exact(&mut buf).await?;
+        let packet = postcard::from_bytes(&buf)?;
+        Ok(packet)
+    }
+}
+
+/// TCP 控制连接写入端
+pub struct ControlWriter {
+    writer: OwnedWriteHalf,
+}
+
+impl ControlWriter {
+    pub async fn send_packet(&mut self, packet: &ControlPacket) -> Result<()> {
+        let bytes = postcard::to_allocvec(packet)?;
+        let len = bytes.len() as u32;
+        self.writer.write_u32(len).await?;
+        self.writer.write_all(&bytes).await?;
+        self.writer.flush().await?;
+        Ok(())
+    }
+}
+
 /// TCP 控制连接
 pub struct ControlConnection {
     stream: TcpStream,
@@ -54,6 +90,7 @@ impl ControlConnection {
         let len = bytes.len() as u32;
         self.stream.write_u32(len).await?;
         self.stream.write_all(&bytes).await?;
+        self.stream.flush().await?;
         Ok(())
     }
 
@@ -68,13 +105,9 @@ impl ControlConnection {
         Ok(packet)
     }
 
-    pub fn split(
-        self,
-    ) -> (
-        tokio::net::tcp::OwnedReadHalf,
-        tokio::net::tcp::OwnedWriteHalf,
-    ) {
-        self.stream.into_split()
+    pub fn split(self) -> (ControlReader, ControlWriter) {
+        let (r, w) = self.stream.into_split();
+        (ControlReader { reader: r }, ControlWriter { writer: w })
     }
 
     pub fn peer_addr(&self) -> Result<SocketAddr> {

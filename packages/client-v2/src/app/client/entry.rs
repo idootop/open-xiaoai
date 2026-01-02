@@ -9,6 +9,6 @@ pub async fn run_client() -> Result<()> {
     let mac = "00:11:22:33:44:55";
     let version = 1;
 
-    let client = Client::new(model, mac, version);
+    let client = std::sync::Arc::new(Client::new(model, mac, version));
     client.run().await
 }

@@ -1,12 +1,15 @@
 build-server:
-	clear && cargo build --release --bin server --features app
+	cargo build --release --bin server --features app
 
 build-client:
-	clear && docker run --rm -v $(shell pwd):/app idootop/open-xiaoai-runtime:oh2p \
+	docker run --rm -v $(shell pwd):/app idootop/open-xiaoai-runtime:oh2p \
 	cargo build --target armv7-unknown-linux-gnueabihf --release --bin client --features app
 
 run-server:
 	target/release/server
+
+test:
+	clear && make build-client && make deploy && make build-server && make run-server
 
 # 部署到小爱音箱（调试自用）
 deploy:
