@@ -6,9 +6,5 @@ async fn main() -> Result<()> {
     {
         xiao::app::client::entry::run_client().await?;
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        eprintln!("Only support Linux");
-    }
     Ok(())
 }

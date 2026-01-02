@@ -1,45 +1,59 @@
+use crate::audio::config::AudioConfig;
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Copy)]
-pub enum ChannelRole {
-    Left,
-    Right,
-}
-
-impl ChannelRole {
-    pub fn to_string(&self) -> String {
-        match self {
-            ChannelRole::Left => "左声道".to_string(),
-            ChannelRole::Right => "右声道".to_string(),
-        }
-    }
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DeviceInfo {
+    pub model: String,
+    pub mac: String,
+    pub version: u32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ControlPacket {
-    // 发现协议
+    // 服务发现
     ServerHello {
-        udp_port: u16, // UDP 音频流端口
+        tcp_port: u16,
     },
-    // 握手协议
+    // 握手与认证
     ClientIdentify {
-        role: ChannelRole,
+        info: DeviceInfo,
     },
-    // 时间同步 (持续进行)
-    Ping {
-        client_ts: u128,
-        seq: u32,
+    IdentifyOk,
+
+    // 音频控制
+    StartRecording {
+        config: AudioConfig,
     },
-    Pong {
-        client_ts: u128,
-        server_ts: u128,
-        seq: u32,
+    StopRecording,
+    StartPlayback {
+        config: AudioConfig,
     },
+    StopPlayback,
+
+    // RPC
+    RpcRequest {
+        id: u32,
+        method: String,
+        args: Vec<String>,
+    },
+    RpcResponse {
+        id: u32,
+        result: RpcResult,
+    },
+
+    // 心跳
+    Ping,
+    Pong,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct RpcResult {
+    pub stdout: String,
+    pub stderr: String,
+    pub code: i32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AudioPacket {
-    pub seq: u32,        // 序列号，用于丢包检测
-    pub timestamp: u128, // 目标播放时间 (主节点时间)
-    pub data: Vec<u8>,   // Opus 编码数据
+    pub data: Vec<u8>, // Opus 编码数据
 }

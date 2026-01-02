@@ -10,13 +10,13 @@ pub const DISCOVERY_PORT: u16 = 53530;
 pub struct Discovery;
 
 impl Discovery {
-    /// 主节点：启动广播，告知从节点自己的 TCP 端口
+    /// 服务端：启动广播，告知客户端自己的 TCP 端口
     pub async fn start_broadcast(tcp_port: u16) -> Result<()> {
         let socket = UdpSocket::bind("0.0.0.0:0").await?;
         socket.set_broadcast(true)?;
 
         let target: SocketAddr = format!("255.255.255.255:{}", DISCOVERY_PORT).parse()?;
-        let msg = postcard::to_allocvec(&ControlPacket::ServerHello { udp_port: tcp_port })?;
+        let msg = postcard::to_allocvec(&ControlPacket::ServerHello { tcp_port })?;
 
         tokio::spawn(async move {
             loop {
@@ -28,17 +28,17 @@ impl Discovery {
         Ok(())
     }
 
-    /// 从节点：监听广播，发现主节点的 IP 和 TCP 端口
-    pub async fn discover_master() -> Result<(IpAddr, u16)> {
+    /// 客户端：监听广播，发现服务端的 IP 和 TCP 端口
+    pub async fn discover_server() -> Result<(IpAddr, u16)> {
         let socket = UdpSocket::bind(format!("0.0.0.0:{}", DISCOVERY_PORT)).await?;
         let mut buf = [0u8; 1024];
 
         loop {
             let (len, addr) = socket.recv_from(&mut buf).await?;
-            if let Ok(ControlPacket::ServerHello { udp_port }) =
+            if let Ok(ControlPacket::ServerHello { tcp_port }) =
                 postcard::from_bytes::<ControlPacket>(&buf[..len])
             {
-                return Ok((addr.ip(), udp_port));
+                return Ok((addr.ip(), tcp_port));
             }
         }
     }

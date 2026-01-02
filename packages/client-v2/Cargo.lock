@@ -541,6 +541,7 @@ dependencies = [
  "alsa",
  "anyhow",
  "opus",
+ "parking_lot",
  "postcard",
  "serde",
  "tokio",

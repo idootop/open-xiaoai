@@ -1,10 +1,12 @@
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AudioScene {
     Music,
     Voice,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioConfig {
     // ALSA 设备参数，用于录音和播放
     pub capture_device: String,

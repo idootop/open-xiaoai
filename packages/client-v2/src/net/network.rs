@@ -34,11 +34,6 @@ impl AudioSocket {
         Ok((packet, addr))
     }
 
-    pub async fn punch(&self, target: SocketAddr) -> Result<()> {
-        self.socket.send_to(&[0u8; 1], target).await?;
-        Ok(())
-    }
-
     pub fn clone_inner(&self) -> Arc<UdpSocket> {
         self.socket.clone()
     }
@@ -56,16 +51,20 @@ impl ControlConnection {
 
     pub async fn send_packet(&mut self, packet: &ControlPacket) -> Result<()> {
         let bytes = postcard::to_allocvec(packet)?;
+        let len = bytes.len() as u32;
+        self.stream.write_u32(len).await?;
         self.stream.write_all(&bytes).await?;
         Ok(())
     }
 
-    pub async fn recv_packet(&mut self, buf: &mut [u8]) -> Result<ControlPacket> {
-        let len = self.stream.read(buf).await?;
-        if len == 0 {
-            return Err(anyhow::anyhow!("连接已关闭"));
+    pub async fn recv_packet(&mut self) -> Result<ControlPacket> {
+        let len = self.stream.read_u32().await? as usize;
+        if len > 10 * 1024 * 1024 {
+            return Err(anyhow::anyhow!("Packet too large: {}", len));
         }
-        let packet = postcard::from_bytes(&buf[..len])?;
+        let mut buf = vec![0u8; len];
+        self.stream.read_exact(&mut buf).await?;
+        let packet = postcard::from_bytes(&buf)?;
         Ok(packet)
     }
 
@@ -77,19 +76,21 @@ impl ControlConnection {
     ) {
         self.stream.into_split()
     }
+
+    pub fn peer_addr(&self) -> Result<SocketAddr> {
+        self.stream.peer_addr().context("Failed to get peer addr")
+    }
 }
 
-/// 主节点网络管理器
-pub struct MasterNetwork {
+/// 服务端网络管理器
+pub struct ServerNetwork {
     listener: TcpListener,
-    audio: AudioSocket,
 }
 
-impl MasterNetwork {
+impl ServerNetwork {
     pub async fn setup(port: u16) -> Result<Self> {
         let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
-        let audio = AudioSocket::bind().await?;
-        Ok(Self { listener, audio })
+        Ok(Self { listener })
     }
 
     pub async fn accept(&self) -> Result<(ControlConnection, SocketAddr)> {
@@ -97,30 +98,29 @@ impl MasterNetwork {
         Ok((ControlConnection::new(stream), addr))
     }
 
-    pub fn audio_socket(&self) -> &AudioSocket {
-        &self.audio
+    pub fn local_addr(&self) -> Result<SocketAddr> {
+        self.listener
+            .local_addr()
+            .context("Failed to get local addr")
     }
 }
 
-/// 从节点网络管理器
-pub struct SlaveNetwork {
+/// 客户端网络管理器
+pub struct ClientNetwork {
     control: ControlConnection,
-    audio: AudioSocket,
 }
 
-impl SlaveNetwork {
-    pub async fn connect(master_addr: SocketAddr) -> Result<Self> {
-        let stream = TcpStream::connect(master_addr)
+impl ClientNetwork {
+    pub async fn connect(server_addr: SocketAddr) -> Result<Self> {
+        let stream = TcpStream::connect(server_addr)
             .await
-            .context(format!("无法连接到主节点 TCP 地址: {}", master_addr))?;
-        let audio = AudioSocket::bind().await?;
+            .context(format!("无法连接到服务端 TCP 地址: {}", server_addr))?;
         Ok(Self {
             control: ControlConnection::new(stream),
-            audio,
         })
     }
 
-    pub fn split(self) -> (ControlConnection, AudioSocket) {
-        (self.control, self.audio)
+    pub fn into_control(self) -> ControlConnection {
+        self.control
     }
 }
