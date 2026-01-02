@@ -69,6 +69,21 @@ impl Client {
         }
     }
 
+    pub async fn call(&self, method: &str, args: Vec<String>) -> Result<RpcResult> {
+        let (id, rx) = self.rpc.register();
+        if let Some(conn) = self.conn.lock().await.as_ref() {
+            conn.send(&ControlPacket::RpcRequest {
+                id,
+                method: method.to_string(),
+                args,
+            })
+            .await?;
+            Ok(rx.await?)
+        } else {
+            Err(anyhow::anyhow!("Not connected"))
+        }
+    }
+
     async fn handle_packet(
         &self,
         packet: ControlPacket,

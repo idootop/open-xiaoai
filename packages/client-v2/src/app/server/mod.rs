@@ -136,23 +136,30 @@ impl Server {
             })
             .await?;
         let audio = self.audio.clone();
+        let target_addr = session.audio_addr;
+        let filename = format!("temp/recorded_{}.wav", session.info.mac.replace(":", ""));
         tokio::spawn(async move {
             let mut writer =
-                WavWriter::create("temp/recorded.wav", config.sample_rate, config.channels)
-                    .unwrap();
+                WavWriter::create(&filename, config.sample_rate, config.channels).unwrap();
             let mut codec = OpusCodec::new(&config).unwrap();
             let mut pcm = vec![0i16; config.frame_size];
             let mut buf = vec![0u8; 4096];
+            println!(
+                "Recording started for {}, saving to {}",
+                target_addr, filename
+            );
             for _ in 0..500 {
                 // Record ~10s
-                if let Ok((packet, _)) = audio.recv(&mut buf).await {
-                    if let Ok(n) = codec.decode(&packet.data, &mut pcm) {
-                        writer.write_samples(&pcm[..n]).unwrap();
+                if let Ok((packet, src_addr)) = audio.recv(&mut buf).await {
+                    if src_addr == target_addr {
+                        if let Ok(n) = codec.decode(&packet.data, &mut pcm) {
+                            writer.write_samples(&pcm[..n]).unwrap();
+                        }
                     }
                 }
             }
             writer.finalize().unwrap();
-            println!("Recording saved to temp/recorded.wav");
+            println!("Recording saved to {}", filename);
         });
         Ok(())
     }
@@ -216,9 +223,30 @@ impl Server {
 
 async fn handle_packet(session: Arc<Session>, packet: ControlPacket) -> Result<()> {
     match packet {
+        ControlPacket::RpcRequest { id, method, args } => {
+            let result = handle_rpc(&session, &method, args).await;
+            session
+                .conn
+                .send(&ControlPacket::RpcResponse { id, result })
+                .await?;
+        }
         ControlPacket::RpcResponse { id, result } => session.rpc.resolve(id, result),
         ControlPacket::Ping => session.conn.send(&ControlPacket::Pong).await?,
         _ => {}
     }
     Ok(())
+}
+
+async fn handle_rpc(_session: &Arc<Session>, method: &str, args: Vec<String>) -> RpcResult {
+    match method {
+        "hello" => RpcResult {
+            stdout: format!("Hello from server! Args: {:?}", args),
+            ..Default::default()
+        },
+        _ => RpcResult {
+            stderr: format!("Unknown method: {}", method),
+            code: -1,
+            ..Default::default()
+        },
+    }
 }
