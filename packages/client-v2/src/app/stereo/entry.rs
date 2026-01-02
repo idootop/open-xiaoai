@@ -6,7 +6,7 @@ use crate::net::protocol::ChannelRole;
 use anyhow::Result;
 use std::env;
 
-pub async fn run_xiao() -> Result<()> {
+pub async fn run_stereo() -> Result<()> {
     let args: Vec<String> = env::args().collect();
     if args.len() < 3 {
         eprintln!("用法: {} [master|slave] [left|right]", args[0]);

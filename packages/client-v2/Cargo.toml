@@ -11,6 +11,10 @@ panic = "abort"
 strip = true
 debug = false
 
+[features]
+default = []
+app = []
+
 [dependencies]
 opus = "0.3"
 anyhow = "1.0"

@@ -4,7 +4,7 @@ use anyhow::Result;
 async fn main() -> Result<()> {
     #[cfg(feature = "app")]
     {
-        xiao::app::client::entry::run_client().await?;
+        xiao::app::stereo::entry::run_stereo().await?;
     }
     #[cfg(not(target_os = "linux"))]
     {

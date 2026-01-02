@@ -1,3 +1,3 @@
-pub mod entry;
-pub mod master;
-pub mod slave;
+pub mod client;
+pub mod server;
+pub mod stereo;
