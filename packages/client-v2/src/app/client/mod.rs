@@ -1,14 +1,13 @@
 #![cfg(target_os = "linux")]
 
-use crate::audio::codec::OpusCodec;
-use crate::audio::config::AudioConfig;
-use crate::audio::player::AudioPlayer;
-use crate::audio::recorder::AudioRecorder;
+mod audio_manager;
+
 use crate::net::discovery::Discovery;
 use crate::net::network::{AudioSocket, Connection};
-use crate::net::protocol::{AudioPacket, ClientInfo, ControlPacket, RpcResult};
+use crate::net::protocol::{ClientInfo, ControlPacket, RpcResult};
 use crate::net::rpc::RpcManager;
 use anyhow::{Result, anyhow};
+use audio_manager::ClientAudioManager;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc};
@@ -17,11 +16,8 @@ use tokio_util::sync::CancellationToken;
 /// 内部连接上下文，包含了音频流所需的全部信息
 struct ActiveSession {
     conn: Arc<Connection>,
-    audio_socket: Arc<AudioSocket>,
-    server_audio_addr: SocketAddr,
+    audio_manager: ClientAudioManager,
     session_cancel: CancellationToken, // 控制整个 Session 的生命周期
-    record_cancel: RwLock<Option<CancellationToken>>,
-    play_cancel: RwLock<Option<CancellationToken>>,
 }
 
 pub struct Client {
@@ -126,13 +122,15 @@ impl Client {
         );
 
         // --- 初始化 Session ---
+        let session_cancel = CancellationToken::new();
         let session = Arc::new(ActiveSession {
             conn: conn.clone(),
-            audio_socket,
-            server_audio_addr,
-            session_cancel: CancellationToken::new(),
-            record_cancel: RwLock::new(None),
-            play_cancel: RwLock::new(None),
+            audio_manager: ClientAudioManager::new(
+                audio_socket,
+                server_audio_addr,
+                session_cancel.clone(),
+            ),
+            session_cancel,
         });
         *self.session.write().await = Some(session.clone());
 
@@ -206,22 +204,16 @@ impl Client {
                     .await?;
             }
             ControlPacket::StartRecording { config } => {
-                self.stop_recorder(session).await; // 开启前先停止旧的，防止资源冲突
-                let token = session.session_cancel.child_token();
-                *session.record_cancel.write().await = Some(token.clone());
-                self.spawn_recorder(session.clone(), config, token);
+                session.audio_manager.start_recording(config).await;
             }
             ControlPacket::StartPlayback { config } => {
-                self.stop_player(session).await;
-                let token = session.session_cancel.child_token();
-                *session.play_cancel.write().await = Some(token.clone());
-                self.spawn_player(session.clone(), config, token);
+                session.audio_manager.start_playback(config).await;
             }
             ControlPacket::StopRecording => {
-                self.stop_recorder(session).await;
+                session.audio_manager.stop_recorder().await;
             }
             ControlPacket::StopPlayback => {
-                self.stop_player(session).await;
+                session.audio_manager.stop_player().await;
             }
             _ => {}
         }
@@ -254,120 +246,6 @@ impl Client {
                 ..Default::default()
             },
         }
-    }
-
-    async fn stop_recorder(&self, session: &ActiveSession) {
-        let mut cancel_guard = session.record_cancel.write().await;
-        if let Some(token) = cancel_guard.take() {
-            token.cancel();
-        }
-    }
-
-    async fn stop_player(&self, session: &ActiveSession) {
-        let mut cancel_guard = session.play_cancel.write().await;
-        if let Some(token) = cancel_guard.take() {
-            token.cancel();
-        }
-    }
-
-    fn spawn_recorder(
-        &self,
-        session: Arc<ActiveSession>,
-        config: AudioConfig,
-        token: CancellationToken,
-    ) {
-        tokio::spawn(async move {
-            let (pcm_tx, mut pcm_rx) = mpsc::channel::<Vec<i16>>(32);
-            let conf = config.clone();
-
-            // 录音线程 (ALSA 阻塞)
-            std::thread::spawn(move || {
-                let recorder = match AudioRecorder::new(&conf) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        eprintln!("Failed to start recorder: {}", e);
-                        return;
-                    }
-                };
-                let mut buf = vec![0i16; conf.frame_size];
-                while let Ok(n) = recorder.read(&mut buf) {
-                    if pcm_tx.blocking_send(buf[..n].to_vec()).is_err() {
-                        break;
-                    }
-                }
-            });
-
-            let mut codec = match OpusCodec::new(&config) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("Failed to init opus codec: {}", e);
-                    return;
-                }
-            };
-            println!("Recording started...");
-            loop {
-                tokio::select! {
-                    _ = token.cancelled() => break,
-                    Some(pcm) = pcm_rx.recv() => {
-                        let mut out = vec![0u8; 4096];
-                        if let Ok(len) = codec.encode(&pcm, &mut out) {
-                            let _ = session.audio_socket.send(&AudioPacket { data: out[..len].to_vec() }, session.server_audio_addr).await;
-                        }
-                    }
-                }
-            }
-            println!("Recording stopped.");
-        });
-    }
-
-    fn spawn_player(
-        &self,
-        session: Arc<ActiveSession>,
-        config: AudioConfig,
-        token: CancellationToken,
-    ) {
-        tokio::spawn(async move {
-            let (pcm_tx, mut pcm_rx) = mpsc::channel::<Vec<i16>>(32);
-            let conf = config.clone();
-
-            // 播放线程 (ALSA 阻塞)
-            std::thread::spawn(move || {
-                let player = match AudioPlayer::new(&conf) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        eprintln!("Failed to start player: {}", e);
-                        return;
-                    }
-                };
-                while let Some(pcm) = pcm_rx.blocking_recv() {
-                    let _ = player.write(&pcm);
-                }
-            });
-
-            let mut codec = match OpusCodec::new(&config) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("Failed to init opus codec: {}", e);
-                    return;
-                }
-            };
-            let mut udp_buf = vec![0u8; 4096];
-            println!("Playback started...");
-            loop {
-                tokio::select! {
-                    _ = token.cancelled() => break,
-                    res = session.audio_socket.recv(&mut udp_buf) => {
-                        if let Ok((packet, _)) = res {
-                            let mut pcm = vec![0i16; config.frame_size];
-                            if let Ok(n) = codec.decode(&packet.data, &mut pcm) {
-                                let _ = pcm_tx.send(pcm[..n].to_vec()).await;
-                            }
-                        }
-                    }
-                }
-            }
-            println!("Playback stopped.");
-        });
     }
 
     pub async fn call(&self, method: &str, args: Vec<String>) -> Result<RpcResult> {
