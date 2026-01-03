@@ -1,46 +1,36 @@
 use crate::audio::config::AudioConfig;
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct DeviceInfo {
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ClientInfo {
     pub model: String,
-    pub mac: String,
-    pub version: u32,
-}
-
-impl DeviceInfo {
-    pub fn current() -> Self {
-        Self {
-            model: "Open-XiaoAi-V2".to_string(),
-            mac: "00:00:00:00:00:00".to_string(), // TODO: Get actual MAC
-            version: 1,
-        }
-    }
+    pub serial_number: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ControlPacket {
     // Discovery
-    ServerHello {
-        tcp_port: u16,
-        udp_port: u16,
+    Discovery {
+        protocol: String,
+        port: u16,
     },
-    // Handshake
-    ClientIdentify {
-        info: DeviceInfo,
-        udp_port: u16,
-    },
-    IdentifyOk,
 
-    // Audio Control
-    StartRecording {
-        config: AudioConfig,
+    // Handshake
+    ServerHello {
+        auth: String,
+        version: String,
+        udp_port: u16, // for audio
     },
-    StopRecording,
-    StartPlayback {
-        config: AudioConfig,
+    ClientHello {
+        auth: String,
+        version: String,
+        udp_port: u16, // for audio
+        info: ClientInfo,
     },
-    StopPlayback,
+
+    // Heartbeat
+    Ping,
+    Pong,
 
     // RPC
     RpcRequest {
@@ -53,9 +43,15 @@ pub enum ControlPacket {
         result: RpcResult,
     },
 
-    // Heartbeat
-    Ping,
-    Pong,
+    // Audio Control
+    StartRecording {
+        config: AudioConfig,
+    },
+    StopRecording,
+    StartPlayback {
+        config: AudioConfig,
+    },
+    StopPlayback,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]

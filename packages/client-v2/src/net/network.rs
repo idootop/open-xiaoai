@@ -6,11 +6,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::Mutex;
 
-pub struct NetConfig {
-    pub tcp_port: u16,
-    pub udp_port: u16,
-}
-
 /// A unified control connection over TCP
 pub struct Connection {
     reader: Mutex<tokio::net::tcp::OwnedReadHalf>,

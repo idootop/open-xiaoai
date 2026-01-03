@@ -35,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
             tokio::time::sleep(std::time::Duration::from_secs(12)).await;
 
             println!("3. Testing Audio Playback (from temp/test.wav)...");
-            server.start_play(addr).await?;
+            server.start_play(addr, "temp/test.wav").await?;
 
             break;
         }

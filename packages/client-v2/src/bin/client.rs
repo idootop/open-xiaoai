@@ -1,6 +1,14 @@
-use xiao::app::client::Client;
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
+#[cfg(target_os = "linux")]
+use xiao::app::client::Client;
 
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    println!("This client only works on Linux due to ALSA dependencies.");
+}
+
+#[cfg(target_os = "linux")]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let client = Arc::new(Client::new());
