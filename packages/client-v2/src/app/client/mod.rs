@@ -40,7 +40,7 @@ use crate::net::command::{
 use crate::net::discovery::Discovery;
 use crate::net::event::{ClientEvent, NotificationLevel, ServerEvent};
 use crate::net::network::{AudioSocket, Connection};
-use crate::net::protocol::{ClientInfo, ControlPacket};
+use crate::net::protocol::ControlPacket;
 use anyhow::{Result, anyhow};
 use session::handshake;
 use std::net::SocketAddr;
@@ -49,24 +49,37 @@ use tokio::sync::{RwLock, broadcast};
 use tokio_util::sync::CancellationToken;
 
 /// 客户端配置
+#[derive(Debug, Clone)]
 pub struct ClientConfig {
-    /// 客户端型号
-    pub model: String,
-    /// 序列号
-    pub serial_number: String,
+    /// 版本
+    pub version: String,
+    /// 客户端认证
+    pub client_auth: String,
+    /// 服务端认证
+    pub server_auth: String,
     /// 心跳间隔（秒）
     pub heartbeat_interval: u64,
     /// 连接超时（秒）
     pub timeout: u64,
+    /// 客户端型号
+    pub model: String,
+    /// 序列号
+    pub serial_number: String,
 }
 
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
-            model: "Open-XiaoAi-V2".to_string(),
-            serial_number: "00:00:00:00:00:00".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            server_auth: std::env::var("XIAO_SERVER_AUTH")
+                .unwrap_or_else(|_| "xiao-server".to_string()),
+            client_auth: std::env::var("XIAO_CLIENT_AUTH")
+                .unwrap_or_else(|_| "xiao-client".to_string()),
             heartbeat_interval: 10,
             timeout: 60,
+            // todo 获取设备信息
+            model: "Open-XiaoAi-V2".to_string(),
+            serial_number: "00:00:00:00:00:00".to_string(),
         }
     }
 }
@@ -81,8 +94,6 @@ pub struct Client {
     cancel: CancellationToken,
     /// 服务端事件广播
     server_events: broadcast::Sender<ServerEvent>,
-    /// 客户端启动时间
-    started_at: std::time::Instant,
 }
 
 impl Client {
@@ -94,7 +105,6 @@ impl Client {
             session: RwLock::new(None),
             cancel: CancellationToken::new(),
             server_events,
-            started_at: std::time::Instant::now(),
         }
     }
 
@@ -153,13 +163,8 @@ impl Client {
         let audio_socket = Arc::new(AudioSocket::bind().await?);
 
         // 执行握手
-        let client_info = ClientInfo {
-            model: self.config.model.clone(),
-            serial_number: self.config.serial_number.clone(),
-        };
-
         let handshake_result =
-            handshake(&conn, audio_socket.port(), server_addr, client_info).await?;
+            handshake(&conn, audio_socket.port(), server_addr, &self.config).await?;
 
         println!(
             "[Client] Handshake OK, server audio at {}",

@@ -24,18 +24,15 @@ fn main() {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     println!("╔═══════════════════════════════════════════════════════╗");
-    println!("║          XiaoAi Audio Client v{}              ║", env!("CARGO_PKG_VERSION"));
+    println!(
+        "║          XiaoAi Audio Client v{}                  ║",
+        env!("CARGO_PKG_VERSION")
+    );
     println!("╚═══════════════════════════════════════════════════════╝");
     println!();
 
-    // 创建客户端（可以自定义配置）
-    let config = ClientConfig {
-        model: "Open-XiaoAi-Demo".to_string(),
-        serial_number: get_mac_address(),
-        heartbeat_interval: 10,
-        timeout: 60,
-    };
-
+    // 创建客户端
+    let config = ClientConfig::default();
     let client = Arc::new(Client::new(config));
 
     // 启动事件监听器
@@ -103,18 +100,4 @@ async fn main() -> anyhow::Result<()> {
     println!("\nShutting down client...");
     client.shutdown();
     Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn get_mac_address() -> String {
-    // 尝试获取 MAC 地址
-    if let Ok(output) = std::process::Command::new("cat")
-        .arg("/sys/class/net/eth0/address")
-        .output()
-    {
-        if output.status.success() {
-            return String::from_utf8_lossy(&output.stdout).trim().to_string();
-        }
-    }
-    "00:00:00:00:00:00".to_string()
 }

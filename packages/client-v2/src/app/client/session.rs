@@ -15,7 +15,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-use super::pipeline::PipelineHandle;
+use super::{ClientConfig, pipeline::PipelineHandle};
 
 /// 活动管道追踪
 pub struct ActivePipelines {
@@ -224,20 +224,17 @@ pub async fn handshake(
     conn: &Connection,
     audio_port: u16,
     server_addr: SocketAddr,
-    client_info: ClientInfo,
+    config: &ClientConfig,
 ) -> Result<HandshakeResult> {
-    let version = env!("CARGO_PKG_VERSION").to_string();
-    let server_auth =
-        std::env::var("XIAO_SERVER_AUTH").unwrap_or_else(|_| "xiao-server".to_string());
-    let client_auth =
-        std::env::var("XIAO_CLIENT_AUTH").unwrap_or_else(|_| "xiao-client".to_string());
-
     // 发送 ClientHello
     conn.send(&ControlPacket::ClientHello {
-        auth: server_auth,
-        version: version.clone(),
         udp_port: audio_port,
-        info: client_info,
+        auth: config.server_auth.clone(),
+        version: config.version.clone(),
+        info: ClientInfo {
+            model: config.model.clone(),
+            serial_number: config.serial_number.clone(),
+        },
     })
     .await?;
 
@@ -248,10 +245,10 @@ pub async fn handshake(
             udp_port,
             auth,
         } => {
-            if v != version {
-                return Err(anyhow!("Server version mismatch: {} != {}", v, version));
+            if v != config.version {
+                return Err(anyhow!("Server version mismatch"));
             }
-            if auth != client_auth {
+            if auth != config.client_auth {
                 return Err(anyhow!("Invalid server auth"));
             }
             udp_port

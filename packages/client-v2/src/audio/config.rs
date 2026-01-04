@@ -30,7 +30,7 @@ impl AudioConfig {
             audio_scene: AudioScene::Voice,
             bitrate: 32_000,
             vbr: true,
-            fec: true,
+            fec: false,
         }
     }
 
@@ -42,9 +42,9 @@ impl AudioConfig {
             channels: 2,
             frame_size: 960, // 20ms
             audio_scene: AudioScene::Music,
-            bitrate: 128_000,
+            bitrate: 320_000,
             vbr: true,
-            fec: true,
+            fec: false,
         }
     }
 }

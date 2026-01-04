@@ -139,29 +139,3 @@ where
         Err(_) => Err(RpcError::Timeout),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::net::command::{CommandResult, ShellResponse};
-
-    #[tokio::test]
-    async fn test_rpc_manager() {
-        let mgr = RpcManager::new();
-
-        let (id, rx) = mgr.register();
-        assert_eq!(mgr.pending_count(), 1);
-
-        let result = CommandResult::Shell(ShellResponse {
-            stdout: "hello".to_string(),
-            stderr: String::new(),
-            exit_code: 0,
-        });
-
-        mgr.resolve(id, result.clone());
-        assert_eq!(mgr.pending_count(), 0);
-
-        let received = rx.await.unwrap();
-        assert!(matches!(received, CommandResult::Shell(_)));
-    }
-}

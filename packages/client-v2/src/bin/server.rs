@@ -7,7 +7,7 @@
 //! - 事件广播
 
 use std::sync::Arc;
-use xiao::app::server::Server;
+use xiao::app::server::{Server, ServerConfig};
 use xiao::audio::config::AudioConfig;
 use xiao::net::command::Command;
 use xiao::net::event::{NotificationLevel, ServerEvent};
@@ -15,11 +15,16 @@ use xiao::net::event::{NotificationLevel, ServerEvent};
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     println!("╔═══════════════════════════════════════════════════════╗");
-    println!("║          XiaoAi Audio Server v{}              ║", env!("CARGO_PKG_VERSION"));
+    println!(
+        "║          XiaoAi Audio Server v{}              ║",
+        env!("CARGO_PKG_VERSION")
+    );
     println!("╚═══════════════════════════════════════════════════════╝");
     println!();
 
-    let server = Arc::new(Server::new().await?);
+    // 创建服务端
+    let config = ServerConfig::default();
+    let server = Arc::new(Server::new(config).await?);
     let s = server.clone();
 
     // 启动服务器
@@ -98,18 +103,6 @@ async fn main() -> anyhow::Result<()> {
             .await;
         println!("   ✅ Event broadcasted");
 
-        // 5. 测试音频录制
-        println!("\n5️⃣  Testing Audio Recording (5 seconds)...");
-        match server.start_record(addr, AudioConfig::voice_16k()).await {
-            Ok(_) => {
-                println!("   ⏺️  Recording started...");
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                server.stop_record(addr).await?;
-                println!("   ⏹️  Recording stopped");
-            }
-            Err(e) => println!("   ❌ Recording failed: {}", e),
-        }
-
         // 6. 测试音频播放（如果有测试文件）
         println!("\n6️⃣  Testing Audio Playback...");
         if std::path::Path::new("temp/test.wav").exists() {
@@ -124,6 +117,18 @@ async fn main() -> anyhow::Result<()> {
             }
         } else {
             println!("   ⚠️  No test file found at temp/test.wav, skipping...");
+        }
+
+        // 5. 测试音频录制
+        println!("\n5️⃣  Testing Audio Recording (5 seconds)...");
+        match server.start_record(addr, AudioConfig::voice_16k()).await {
+            Ok(_) => {
+                println!("   ⏺️  Recording started...");
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                server.stop_record(addr).await?;
+                println!("   ⏹️  Recording stopped");
+            }
+            Err(e) => println!("   ❌ Recording failed: {}", e),
         }
 
         println!("\n═══════════════════════════════════════════════════════");

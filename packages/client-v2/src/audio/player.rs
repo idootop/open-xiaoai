@@ -11,21 +11,17 @@ pub struct AudioPlayer {
 
 impl AudioPlayer {
     pub fn new(config: &AudioConfig) -> Result<Self> {
-        let pcm = PCM::new(&config.playback_device, Direction::Playback, false)?;
+        let pcm = PCM::new(&config.playback_device, Direction::Playback, false)
+            .context("Failed to open playback PCM device")?;
         {
-            let hwp = HwParams::any(&pcm)?;
+            let hwp = HwParams::any(&pcm).context("Failed to get HwParams")?;
             hwp.set_access(Access::RWInterleaved)?;
             hwp.set_format(Format::s16())?;
             hwp.set_rate_near(config.sample_rate, alsa::ValueOr::Nearest)?;
-            hwp.set_channels_near(config.channels as u32)?;
-
-            // 100ms buffer to prevent underruns
-            let buffer_size = (config.sample_rate as f64 * 0.1) as u32;
-            hwp.set_buffer_size_near(buffer_size as alsa::pcm::Frames)?;
-
+            hwp.set_channels(config.channels as u32)?;
             pcm.hw_params(&hwp)?;
         }
-        pcm.prepare()?;
+        pcm.prepare().context("Failed to prepare PCM")?;
         Ok(Self { pcm })
     }
 

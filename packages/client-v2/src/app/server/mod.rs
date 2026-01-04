@@ -56,8 +56,36 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
+/// 服务端配置
+#[derive(Debug, Clone)]
+pub struct ServerConfig {
+    /// 版本
+    pub version: String,
+    /// 客户端认证
+    pub client_auth: String,
+    /// 服务端认证
+    pub server_auth: String,
+    /// 连接超时（秒）
+    pub timeout: u64,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            server_auth: std::env::var("XIAO_SERVER_AUTH")
+                .unwrap_or_else(|_| "xiao-server".to_string()),
+            client_auth: std::env::var("XIAO_CLIENT_AUTH")
+                .unwrap_or_else(|_| "xiao-client".to_string()),
+            timeout: 60,
+        }
+    }
+}
+
 /// 实时音频服务器
 pub struct Server {
+    /// 配置
+    config: ServerConfig,
     /// 会话管理器
     sessions: Arc<SessionManager>,
     /// 音频总线
@@ -72,10 +100,11 @@ pub struct Server {
 
 impl Server {
     /// 创建新服务器
-    pub async fn new() -> Result<Self> {
+    pub async fn new(config: ServerConfig) -> Result<Self> {
         let audio_bus = Arc::new(AudioBus::new().await?);
 
         Ok(Self {
+            config,
             sessions: Arc::new(SessionManager::new()),
             audio_bus,
             event_bus: Arc::new(ServerEventBus::default()),
@@ -216,12 +245,6 @@ impl Server {
         conn: &Arc<Connection>,
         addr: SocketAddr,
     ) -> Result<(crate::net::protocol::ClientInfo, SocketAddr)> {
-        let version = env!("CARGO_PKG_VERSION").to_string();
-        let server_auth =
-            std::env::var("XIAO_SERVER_AUTH").unwrap_or_else(|_| "xiao-server".to_string());
-        let client_auth =
-            std::env::var("XIAO_CLIENT_AUTH").unwrap_or_else(|_| "xiao-client".to_string());
-
         // 等待客户端 Hello
         let (info, client_audio_port) = match conn.recv().await? {
             ControlPacket::ClientHello {
@@ -230,10 +253,10 @@ impl Server {
                 udp_port,
                 info,
             } => {
-                if v != version {
-                    return Err(anyhow!("Version mismatch: {} != {}", v, version));
+                if v != self.config.version {
+                    return Err(anyhow!("Client version mismatch"));
                 }
-                if auth != server_auth {
+                if auth != self.config.server_auth {
                     return Err(anyhow!("Invalid client auth"));
                 }
                 (info, udp_port)
@@ -243,8 +266,8 @@ impl Server {
 
         // 发送服务器 Hello
         conn.send(&ControlPacket::ServerHello {
-            auth: client_auth,
-            version,
+            auth: self.config.client_auth.clone(),
+            version: self.config.version.clone(),
             udp_port: self.audio_bus.port(),
         })
         .await?;
@@ -255,7 +278,7 @@ impl Server {
 
     /// Session 消息循环
     async fn session_loop(&self, session: Arc<Session>) -> Result<()> {
-        let timeout = std::time::Duration::from_secs(60);
+        let timeout = std::time::Duration::from_secs(self.config.timeout);
 
         loop {
             tokio::select! {
