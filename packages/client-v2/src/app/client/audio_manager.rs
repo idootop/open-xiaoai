@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 pub struct ClientAudioManager {
     audio_socket: Arc<AudioSocket>,
-    server_audio_addr: SocketAddr,
+    audio_addr: SocketAddr,
     session_cancel: CancellationToken,
     record_cancel: RwLock<Option<CancellationToken>>,
     play_cancel: RwLock<Option<CancellationToken>>,
@@ -20,12 +20,12 @@ pub struct ClientAudioManager {
 impl ClientAudioManager {
     pub fn new(
         audio_socket: Arc<AudioSocket>,
-        server_audio_addr: SocketAddr,
+        audio_addr: SocketAddr,
         session_cancel: CancellationToken,
     ) -> Self {
         Self {
             audio_socket,
-            server_audio_addr,
+            audio_addr,
             session_cancel,
             record_cancel: RwLock::new(None),
             play_cancel: RwLock::new(None),
@@ -52,7 +52,7 @@ impl ClientAudioManager {
         *self.record_cancel.write().await = Some(token.clone());
 
         let audio_socket = self.audio_socket.clone();
-        let server_audio_addr = self.server_audio_addr;
+        let audio_addr = self.audio_addr;
 
         tokio::spawn(async move {
             let (pcm_tx, mut pcm_rx) = mpsc::channel::<Vec<i16>>(32);
@@ -89,7 +89,7 @@ impl ClientAudioManager {
                     Some(pcm) = pcm_rx.recv() => {
                         let mut out = vec![0u8; 4096];
                         if let Ok(len) = codec.encode(&pcm, &mut out) {
-                            let _ = audio_socket.send(&AudioPacket { data: out[..len].to_vec() }, server_audio_addr).await;
+                            let _ = audio_socket.send(&AudioPacket { data: out[..len].to_vec() }, audio_addr).await;
                         }
                     }
                 }

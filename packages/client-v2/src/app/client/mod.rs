@@ -10,14 +10,13 @@ use anyhow::{Result, anyhow};
 use audio_manager::ClientAudioManager;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{RwLock};
 use tokio_util::sync::CancellationToken;
 
-/// 内部连接上下文，包含了音频流所需的全部信息
 struct ActiveSession {
     conn: Arc<Connection>,
     audio_manager: ClientAudioManager,
-    session_cancel: CancellationToken, // 控制整个 Session 的生命周期
+    session_cancel: CancellationToken,
 }
 
 pub struct Client {
@@ -35,11 +34,12 @@ impl Client {
 
     pub async fn run(self: Arc<Self>) -> Result<()> {
         loop {
+            println!("Searching for server...");
             let (ip, tcp_port) = match Discovery::listen().await {
                 Ok(res) => res,
                 Err(e) => {
                     eprintln!("Discovery listen error: {}", e);
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     continue;
                 }
             };
@@ -47,20 +47,17 @@ impl Client {
             let addr = SocketAddr::new(ip, tcp_port);
             println!("Found server at {}", addr);
 
-            if let Ok(stream) = tokio::net::TcpStream::connect(addr).await {
-                println!("Connected to TCP server at {}", addr);
-                if let Err(e) = self.clone().handle_session(stream, addr).await {
-                    eprintln!("Session error: {:?}", e);
+            match tokio::net::TcpStream::connect(addr).await {
+                Err(e) => eprintln!("Failed to connect to {}: {}", addr, e),
+                Ok(stream) => {
+                    println!("Connected to TCP server at {}", addr);
+                    if let Err(e) = self.clone().handle_session(stream, addr).await {
+                        eprintln!("Session error: {:?}", e);
+                    }
                 }
-            } else {
-                eprintln!("Failed to connect to {}", addr);
             }
 
             self.cleanup().await;
-            println!(
-                "Connection to {} closed, searching for server again...",
-                addr
-            );
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
     }
@@ -83,14 +80,15 @@ impl Client {
         // --- 握手 (Handshake) ---
         let version = env!("CARGO_PKG_VERSION").to_string();
         let server_auth =
-            std::env::var("XIAO_SERVER_AUTH").unwrap_or_else(|_| "open-xiaoai".to_string());
+            std::env::var("XIAO_SERVER_AUTH").unwrap_or_else(|_| "xiao-server".to_string());
         let client_auth =
-            std::env::var("XIAO_CLIENT_AUTH").unwrap_or_else(|_| "open-xiaoai".to_string());
+            std::env::var("XIAO_CLIENT_AUTH").unwrap_or_else(|_| "xiao-client".to_string());
 
         conn.send(&ControlPacket::ClientHello {
             auth: server_auth,
             version: version.clone(),
             udp_port: audio_socket.port(),
+            // todo client info
             info: ClientInfo {
                 model: "Open-XiaoAi-V2".to_string(),
                 serial_number: "00:00:00:00:00:00".to_string(),
@@ -115,10 +113,10 @@ impl Client {
             _ => return Err(anyhow!("Handshake failed")),
         };
 
-        let server_audio_addr = SocketAddr::new(addr.ip(), server_udp_port);
+        let audio_addr = SocketAddr::new(addr.ip(), server_udp_port);
         println!(
             "Handshake successful with {}, audio at {}",
-            addr, server_audio_addr
+            addr, audio_addr
         );
 
         // --- 初始化 Session ---
@@ -127,17 +125,14 @@ impl Client {
             conn: conn.clone(),
             audio_manager: ClientAudioManager::new(
                 audio_socket,
-                server_audio_addr,
+                audio_addr,
                 session_cancel.clone(),
             ),
             session_cancel,
         });
         *self.session.write().await = Some(session.clone());
 
-        // 使用 mpsc 队列来缓冲指令，确保顺序执行且不阻塞接收循环
-        let (cmd_tx, mut cmd_rx) = mpsc::channel::<ControlPacket>(64);
-
-        // 任务 1: 心跳
+        // 心跳
         let hb_session = session.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
@@ -151,25 +146,16 @@ impl Client {
             }
         });
 
-        // 任务 2: 命令处理器 (串行处理所有指令)
-        let proc_self = self.clone();
-        let proc_session = session.clone();
-        tokio::spawn(async move {
-            while let Some(packet) = cmd_rx.recv().await {
-                if let Err(e) = proc_self.process_packet(packet, &proc_session).await {
-                    eprintln!("Process error: {}", e);
-                }
-            }
-        });
-
-        // 任务 3: 接收循环 (高优先级，只读包并分发)
+        // 消息主循环
         loop {
             tokio::select! {
                 _ = session.session_cancel.cancelled() => break,
                 res = tokio::time::timeout(std::time::Duration::from_secs(60), conn.recv()) => {
                     match res {
                         Ok(Ok(packet)) => {
-                            if cmd_tx.send(packet).await.is_err() { break; }
+                            if let Err(e) = self.process_packet(packet, &session).await {
+                                eprintln!("Process packet error: {}", e);
+                            }
                         }
                         Ok(Err(e)) => {
                             return Err(anyhow!("Connection receive error: {}", e));
@@ -183,6 +169,7 @@ impl Client {
         Ok(())
     }
 
+    // todo 考虑有些操作比较耗时，需要非阻塞处理
     async fn process_packet(
         &self,
         packet: ControlPacket,

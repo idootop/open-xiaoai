@@ -6,8 +6,8 @@ use crate::net::discovery::Discovery;
 use crate::net::network::{AudioSocket, Connection};
 use crate::net::protocol::{ClientInfo, ControlPacket, RpcResult};
 use crate::net::rpc::RpcManager;
-use audio_manager::ServerAudioManager;
 use anyhow::{Context, Result, anyhow};
+use audio_manager::ServerAudioManager;
 use dashmap::DashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -72,7 +72,7 @@ impl Server {
             let (stream, addr) = listener.accept().await?;
             let server = self.clone();
             tokio::spawn(async move {
-                if let Err(e) = server.clone().handle_connection(stream, addr).await {
+                if let Err(e) = server.clone().handle_session(stream, addr).await {
                     eprintln!("Session {} error: {}", addr, e);
                 }
                 server.remove_session(&addr).await;
@@ -89,7 +89,7 @@ impl Server {
         }
     }
 
-    async fn handle_connection(
+    async fn handle_session(
         self: Arc<Self>,
         stream: tokio::net::TcpStream,
         addr: SocketAddr,
@@ -100,9 +100,9 @@ impl Server {
         // --- 握手 (Handshake) ---
         let version = env!("CARGO_PKG_VERSION").to_string();
         let server_auth =
-            std::env::var("XIAO_SERVER_AUTH").unwrap_or_else(|_| "open-xiaoai".to_string());
+            std::env::var("XIAO_SERVER_AUTH").unwrap_or_else(|_| "xiao-server".to_string());
         let client_auth =
-            std::env::var("XIAO_CLIENT_AUTH").unwrap_or_else(|_| "open-xiaoai".to_string());
+            std::env::var("XIAO_CLIENT_AUTH").unwrap_or_else(|_| "xiao-client".to_string());
 
         let (info, client_audio_port) = match conn.recv().await? {
             ControlPacket::ClientHello {
@@ -119,9 +119,7 @@ impl Server {
                 }
                 (info, udp_port)
             }
-            p => {
-                return Err(anyhow!("Handshake failed: unexpected packet {:?}", p));
-            }
+            _ => return Err(anyhow!("Handshake failed")),
         };
 
         conn.send(&ControlPacket::ServerHello {
@@ -137,6 +135,7 @@ impl Server {
             info.model, info.serial_number, audio_addr
         );
 
+        // --- 初始化 Session ---
         let tracker = TaskTracker::new();
         let session_cancel = CancellationToken::new();
         let (audio_manager, audio_rx, recorder_rx) =
@@ -153,20 +152,17 @@ impl Server {
             tracker: tracker.clone(),
         });
 
-        session.audio_manager.spawn_audio_processor(audio_rx, recorder_rx);
+        session
+            .audio_manager
+            .spawn_audio_processor(audio_rx, recorder_rx);
 
         self.sessions.insert(addr, session.clone());
         self.udp_to_tcp.insert(audio_addr, addr);
 
-        // --- Main Connection Loop ---
-        // 统一心跳与超时处理，节省资源
-        let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(30));
+        // 消息主循环
         loop {
             tokio::select! {
                 _ = session.session_cancel.cancelled() => break,
-                _ = heartbeat.tick() => {
-                    if conn.send(&ControlPacket::Ping).await.is_err() { break; }
-                }
                 res = tokio::time::timeout(std::time::Duration::from_secs(60), conn.recv()) => {
                     match res {
                         Ok(Ok(packet)) => {
@@ -190,6 +186,11 @@ impl Server {
         Ok(())
     }
 
+    pub async fn get_clients(&self) -> Vec<SocketAddr> {
+        self.sessions.iter().map(|r| *r.key()).collect()
+    }
+
+    // todo 考虑有些操作比较耗时，需要非阻塞处理
     async fn process_packet(&self, session: Arc<Session>, packet: ControlPacket) -> Result<()> {
         match packet {
             ControlPacket::Ping => {
@@ -211,8 +212,23 @@ impl Server {
         Ok(())
     }
 
-    pub async fn get_clients(&self) -> Vec<SocketAddr> {
-        self.sessions.iter().map(|r| *r.key()).collect()
+    async fn handle_rpc(
+        &self,
+        _session: &Arc<Session>,
+        method: &str,
+        args: Vec<String>,
+    ) -> RpcResult {
+        match method {
+            "hello" => RpcResult {
+                stdout: format!("Hello from server! Args: {:?}", args),
+                ..Default::default()
+            },
+            _ => RpcResult {
+                stderr: format!("Unknown method: {}", method),
+                code: -1,
+                ..Default::default()
+            },
+        }
     }
 
     pub async fn call(
@@ -236,25 +252,6 @@ impl Server {
             })
             .await?;
         Ok(rx.await?)
-    }
-
-    async fn handle_rpc(
-        &self,
-        _session: &Arc<Session>,
-        method: &str,
-        args: Vec<String>,
-    ) -> RpcResult {
-        match method {
-            "hello" => RpcResult {
-                stdout: format!("Hello from server! Args: {:?}", args),
-                ..Default::default()
-            },
-            _ => RpcResult {
-                stderr: format!("Unknown method: {}", method),
-                code: -1,
-                ..Default::default()
-            },
-        }
     }
 
     pub async fn start_record(&self, addr: SocketAddr, config: AudioConfig) -> Result<()> {
@@ -324,12 +321,10 @@ impl Server {
             })
             .await?;
 
-        session.audio_manager.start_playback(
-            config,
-            reader,
-            self.audio.clone(),
-            session.audio_addr,
-        ).await?;
+        session
+            .audio_manager
+            .start_playback(config, reader, self.audio.clone(), session.audio_addr)
+            .await?;
 
         Ok(())
     }

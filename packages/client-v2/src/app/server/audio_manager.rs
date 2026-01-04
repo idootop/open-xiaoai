@@ -29,10 +29,17 @@ pub struct ServerAudioManager {
 }
 
 impl ServerAudioManager {
-    pub fn new(session_cancel: CancellationToken, tracker: TaskTracker) -> (Self, mpsc::Receiver<AudioPacket>, mpsc::Receiver<RecorderCommand>) {
+    pub fn new(
+        session_cancel: CancellationToken,
+        tracker: TaskTracker,
+    ) -> (
+        Self,
+        mpsc::Receiver<AudioPacket>,
+        mpsc::Receiver<RecorderCommand>,
+    ) {
         let (audio_tx, audio_rx) = mpsc::channel(1024);
         let (recorder_tx, recorder_rx) = mpsc::channel(64);
-        
+
         let manager = Self {
             session_cancel,
             record_cancel: Mutex::new(None),
@@ -41,7 +48,7 @@ impl ServerAudioManager {
             recorder_tx,
             tracker,
         };
-        
+
         (manager, audio_rx, recorder_rx)
     }
 
@@ -60,10 +67,7 @@ impl ServerAudioManager {
         }
 
         self.recorder_tx
-            .send(RecorderCommand::Start {
-                config,
-                filename,
-            })
+            .send(RecorderCommand::Start { config, filename })
             .await?;
         Ok(())
     }
@@ -94,7 +98,7 @@ impl ServerAudioManager {
         };
 
         let session_cancel = self.session_cancel.clone();
-        
+
         self.tracker.spawn(async move {
             let mut reader = reader;
             let mut codec = match OpusCodec::new(&config) {
@@ -146,7 +150,11 @@ impl ServerAudioManager {
         }
     }
 
-    pub fn spawn_audio_processor(&self, mut audio_rx: mpsc::Receiver<AudioPacket>, mut recorder_rx: mpsc::Receiver<RecorderCommand>) {
+    pub fn spawn_audio_processor(
+        &self,
+        mut audio_rx: mpsc::Receiver<AudioPacket>,
+        mut recorder_rx: mpsc::Receiver<RecorderCommand>,
+    ) {
         let session_cancel = self.session_cancel.clone();
         self.tracker.spawn(async move {
             let mut active_recorder: Option<(WavWriter, OpusCodec, usize)> = None;
@@ -198,4 +206,3 @@ impl ServerAudioManager {
         });
     }
 }
-
