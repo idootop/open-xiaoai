@@ -24,9 +24,12 @@ use crate::audio::player::AudioPlayer;
 use crate::audio::recorder::AudioRecorder;
 use crate::net::network::AudioSocket;
 use crate::net::protocol::AudioPacket;
+use crate::net::sync::now_us;
+use std::collections::VecDeque;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -152,6 +155,8 @@ impl RecordPipeline {
                         Some(samples) => {
                             if let Ok(len) = codec.encode(&samples, &mut opus_buf) {
                                 let packet = AudioPacket {
+                                    seq: 0,
+                                    timestamp: 0,
                                     data: opus_buf[..len].to_vec(),
                                 };
                                 let _ = socket.send(&packet, target).await;
@@ -209,63 +214,86 @@ impl PlaybackPipeline {
         stop_flag: Arc<AtomicBool>,
     ) -> anyhow::Result<()> {
         // 创建 PCM 数据通道
-        let (pcm_tx, pcm_rx) = mpsc::channel::<Vec<i16>>(32);
+        let (pcm_tx, pcm_rx) = mpsc::channel::<AudioPacket>(128);
 
         // 启动 ALSA 播放线程（阻塞 I/O）
         let player_config = config.clone();
         let player_stop = stop_flag.clone();
 
-        std::thread::spawn(move || {
-            let player = match AudioPlayer::new(&player_config) {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("[PlaybackPipeline] Failed to create player: {}", e);
-                    return;
-                }
-            };
+        println!("[PlaybackPipeline] Started");
 
-            // 使用 blocking_recv 在线程中接收
-            let mut rx = pcm_rx;
-            while !player_stop.load(Ordering::SeqCst) {
-                match rx.blocking_recv() {
-                    Some(samples) => {
-                        if let Err(e) = player.write(&samples) {
-                            eprintln!("[PlaybackPipeline] Write error: {}", e);
+        // 主循环：从 UDP 接收，解码后发送给播放线程
+        let mut udp_buf = vec![0u8; 4096];
+        let mut last_time = now_us();
+        tokio::spawn(async move {
+            loop {
+                match socket.recv(&mut udp_buf).await {
+                    Ok((packet, _src)) => {
+                        let now = now_us();
+                        let diff = now - last_time;
+                        println!("Received packet now:{} diff:{}ms", now, diff / 1000);
+                        last_time = now;
+
+                        if let Err(e) = pcm_tx.send(packet).await {
+                            eprintln!("[PlaybackPipeline] PCM channel send error: {}", e);
                             break;
                         }
                     }
-                    None => {
-                        // 通道关闭
-                        break;
+                    Err(e) => {
+                        eprintln!("[PlaybackPipeline] Recv error: {}", e);
                     }
                 }
             }
         });
 
+        let player = match AudioPlayer::new(&player_config) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("[PlaybackPipeline] Failed to create player: {}", e);
+                return Err(e);
+            }
+        };
+
+        // 使用 blocking_recv 在线程中接收
+        let mut rx = pcm_rx;
         // 创建 Opus 解码器
-        let mut codec = OpusCodec::new(&config)?;
-        let mut pcm_buf = vec![0i16; config.frame_size];
-        let mut udp_buf = vec![0u8; 4096];
+        let mut codec = OpusCodec::new(&config).unwrap();
+        let mut pcm_buf = vec![0i16; config.frame_size * config.channels as usize];
 
-        println!("[PlaybackPipeline] Started");
+        let mut jitter_buffer: VecDeque<AudioPacket> = VecDeque::new();
 
-        // 主循环：从 UDP 接收，解码后发送给播放线程
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => break,
-                result = socket.recv(&mut udp_buf) => {
-                    match result {
-                        Ok((packet, _src)) => {
-                            if let Ok(n) = codec.decode(&packet.data, &mut pcm_buf) {
-                                // 使用 try_send 避免阻塞
-                                let _ = pcm_tx.try_send(pcm_buf[..n].to_vec());
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("[PlaybackPipeline] Recv error: {}", e);
-                        }
+        let mut start_time = 0u128;
+        let frame_duration_us =
+            (config.frame_size as f64 / config.sample_rate as f64 * 1_000_000.0) as u128;
+
+        while !player_stop.load(Ordering::SeqCst) {
+            while let Ok(p) = rx.try_recv() {
+                jitter_buffer.push_back(p);
+            }
+            if let Some(pck) = jitter_buffer.front() {
+                let now = now_us();
+                if start_time == 0 {
+                    start_time = now;
+                }
+
+                let target_client_time = start_time + (pck.seq as u128) * frame_duration_us;
+
+                if now >= target_client_time {
+                    let packet = jitter_buffer.pop_front().unwrap();
+                    let samples = codec.decode(&packet.data, &mut pcm_buf)?;
+                    player.write(&pcm_buf[..samples * config.channels as usize])?;
+                } else if target_client_time - now > 500_000 {
+                    // Too far in the future, maybe clock jumped?
+                    jitter_buffer.pop_front();
+                } else {
+                    // Wait until it's time
+                    let wait = (target_client_time - now) as u64;
+                    if wait > 1000 {
+                        tokio::time::sleep(Duration::from_micros(wait)).await;
                     }
                 }
+            } else {
+                tokio::time::sleep(Duration::from_millis(5)).await;
             }
         }
 
@@ -273,4 +301,3 @@ impl PlaybackPipeline {
         Ok(())
     }
 }
-

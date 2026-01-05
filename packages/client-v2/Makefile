@@ -1,9 +1,9 @@
 build-server:
-	cargo build --release --bin server --features app
+	cargo build --release --bin server
 
 build-client:
 	docker run --rm -v $(shell pwd):/app idootop/open-xiaoai-runtime:oh2p \
-	cargo build --target armv7-unknown-linux-gnueabihf --release --bin client --features app
+	cargo build --target armv7-unknown-linux-gnueabihf --release --bin client
 
 run-server:
 	target/release/server

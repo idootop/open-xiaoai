@@ -23,7 +23,7 @@ impl AudioConfig {
     pub fn voice_16k() -> Self {
         Self {
             capture_device: "plug:Capture".to_string(),
-            playback_device: "plug:default".to_string(),
+            playback_device: "default".to_string(),
             sample_rate: 16_000,
             channels: 1,
             frame_size: 320, // 20ms
@@ -37,7 +37,7 @@ impl AudioConfig {
     pub fn music_48k() -> Self {
         Self {
             capture_device: "plug:Capture".to_string(),
-            playback_device: "plug:default".to_string(),
+            playback_device: "default".to_string(),
             sample_rate: 48_000,
             channels: 2,
             frame_size: 960, // 20ms

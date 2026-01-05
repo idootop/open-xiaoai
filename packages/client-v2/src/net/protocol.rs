@@ -19,8 +19,9 @@ pub struct ClientInfo {
 /// 音频数据包 - UDP 通道传输
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AudioPacket {
-    /// Opus 编码的音频数据
-    pub data: Vec<u8>,
+    pub seq: u32,        // 序列号，用于丢包检测
+    pub timestamp: u128, // 目标播放时间 (主节点时间)
+    pub data: Vec<u8>,   // Opus 编码数据
 }
 
 // ==================== 控制包 ====================
@@ -51,8 +52,15 @@ pub enum ControlPacket {
     },
 
     // ========== 心跳 ==========
-    Ping,
-    Pong,
+    Ping {
+        client_ts: u128,
+        seq: u32,
+    },
+    Pong {
+        client_ts: u128,
+        server_ts: u128,
+        seq: u32,
+    },
 
     // ========== RPC ==========
     /// RPC 请求（新版，使用 Command 类型）

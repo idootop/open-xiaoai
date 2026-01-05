@@ -36,7 +36,7 @@ impl WavWriter {
     pub fn finalize(mut self) -> Result<()> {
         self.writer.flush()?;
         let mut file = self.writer.into_inner()?;
-        
+
         file.seek(SeekFrom::Start(0))?;
 
         let file_size = 36 + self.data_size;
@@ -93,14 +93,43 @@ impl WavReader {
         })
     }
 
-    pub fn read_samples(&mut self, samples: &mut [i16]) -> Result<usize> {
-        let mut bytes = vec![0u8; samples.len() * 2];
-        let n = self.reader.read(&mut bytes)?;
-        let sample_count = n / 2;
-        for i in 0..sample_count {
-            samples[i] = i16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]);
+    /// 读取指定的采样数。如果是立体声，则返回左右声道独立的 Vec。
+    /// chunk_size: 每个声道需要读取的采样点数。
+    pub fn read_chunk(&mut self, chunk_size: usize) -> Result<Option<(Vec<i16>, Vec<i16>)>> {
+        let channels = self.channels as usize;
+        let total_samples_to_read = chunk_size * channels;
+        let mut bytes = vec![0u8; total_samples_to_read * 2]; // 预分配完整大小的字节数组
+        
+        let bytes_read = self.reader.read(&mut bytes)?;
+        
+        // 如果连 1 字节都没读到，说明到文件结尾了
+        if bytes_read == 0 {
+            return Ok(None);
         }
-        Ok(sample_count)
+
+        let mut left = vec![0i16; chunk_size];   // 预填 0
+        let mut right = vec![0i16; chunk_size];  // 预填 0
+
+        // 实际读到了多少个采样点（总数）
+        let total_samples_read = bytes_read / 2;
+        // 计算每个声道实际读到了多少个点
+        let samples_per_channel = total_samples_read / channels;
+
+        for i in 0..samples_per_channel {
+            let base = i * channels * 2;
+            
+            // 左声道 (或单声道)
+            left[i] = i16::from_le_bytes([bytes[base], bytes[base + 1]]);
+
+            if channels == 2 {
+                // 右声道
+                right[i] = i16::from_le_bytes([bytes[base + 2], bytes[base + 3]]);
+            } else {
+                // 单声道填充双声道时，复制左声道
+                right[i] = left[i];
+            }
+        }
+
+        Ok(Some((left, right)))
     }
 }
-

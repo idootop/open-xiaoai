@@ -10,6 +10,7 @@ use crate::net::command::{Command, CommandResult};
 use crate::net::network::{AudioSocket, Connection};
 use crate::net::protocol::{ClientInfo, ControlPacket};
 use crate::net::rpc::RpcManager;
+use crate::net::sync::ClockSync;
 use anyhow::{Context, Result, anyhow};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -94,6 +95,9 @@ pub struct Session {
     /// 会话取消令牌
     pub cancel: CancellationToken,
 
+    /// 时间同步
+    pub clock: Arc<parking_lot::Mutex<ClockSync>>,
+
     /// 活动管道
     pipelines: parking_lot::Mutex<ActivePipelines>,
 
@@ -118,6 +122,7 @@ impl Session {
             server_audio_addr,
             rpc: Arc::new(RpcManager::new()),
             cancel,
+            clock: Arc::new(parking_lot::Mutex::new(ClockSync::new(100))),
             pipelines: parking_lot::Mutex::new(ActivePipelines::default()),
             created_at: std::time::Instant::now(),
             volume: parking_lot::Mutex::new(100),
@@ -142,6 +147,13 @@ impl Session {
     /// 接收控制包
     pub async fn recv(&self) -> Result<ControlPacket> {
         self.conn.recv().await
+    }
+
+    /// 更新时间
+    pub fn update_clock(&self, client_send_ts: u128, server_ts: u128, client_recv_ts: u128) {
+        self.clock
+            .lock()
+            .update(client_send_ts, server_ts, client_recv_ts);
     }
 
     /// 发起 RPC 调用（新版）

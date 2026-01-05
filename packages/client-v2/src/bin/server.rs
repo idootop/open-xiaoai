@@ -109,7 +109,7 @@ async fn main() -> anyhow::Result<()> {
             match server.start_play(addr, "temp/test.wav").await {
                 Ok(_) => {
                     println!("   ▶️  Playback started...");
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                     server.stop_play(addr).await?;
                     println!("   ⏹️  Playback stopped");
                 }

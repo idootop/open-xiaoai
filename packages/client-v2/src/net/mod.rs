@@ -14,3 +14,4 @@ pub mod event;
 pub mod network;
 pub mod protocol;
 pub mod rpc;
+pub mod sync;

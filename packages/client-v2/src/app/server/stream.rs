@@ -25,6 +25,7 @@ use crate::audio::config::AudioConfig;
 use crate::audio::wav::{WavReader, WavWriter};
 use crate::net::network::AudioSocket;
 use crate::net::protocol::AudioPacket;
+use crate::net::sync::now_us;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -98,33 +99,78 @@ impl FilePlaybackStream {
         target: SocketAddr,
         cancel: CancellationToken,
     ) -> anyhow::Result<()> {
-        let mut codec = OpusCodec::new(&config)?;
-        let mut pcm = vec![0i16; config.frame_size];
-        let mut opus_buf = vec![0u8; 4096];
-        let frame_duration = std::time::Duration::from_millis(20);
-        let mut interval = tokio::time::interval(frame_duration);
+        #[cfg(not(target_os = "linux"))]
+        {
+            use crate::audio::reader::AudioReader;
+            let mut codec = OpusCodec::new(&config)?;
+            let mut pcm = vec![0i16; config.frame_size * config.channels as usize];
+            let mut opus_buf = vec![0u8; 4096];
 
-        println!("[FilePlayback] Started -> {}", target);
+            println!("[FilePlayback] Started -> {}", target);
 
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => break,
-                _ = interval.tick() => {
-                    match reader.read_samples(&mut pcm) {
-                        Ok(0) => {
-                            println!("[FilePlayback] EOF reached");
-                            break;
-                        }
-                        Ok(n) => {
-                            if let Ok(len) = codec.encode(&pcm[..n], &mut opus_buf) {
+            let mut seq = 0u32;
+            let delay_us = 0_000; // 100ms 基础延迟
+
+            let mut stream_start_ts = 0;
+            let frame_duration_us =
+                (config.frame_size as f64 / config.sample_rate as f64 * 1_000_000.0) as u128;
+
+            let mut reader = AudioReader::new("temp/test.wav")?;
+
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    result = async{
+                        if let Some((left_pcm, right_pcm)) = reader.read_chunk(config.frame_size)?{
+                            let actual_len = left_pcm.len();
+
+                            // 1. 先将 pcm 缓冲区清零（处理尾帧时的静音填充）
+                            pcm.fill(0);
+
+                            // 2. 只循环实际读取到的长度
+                            if config.channels == 2 {
+                                for i in 0..actual_len {
+                                    pcm[i * 2] = left_pcm[i];
+                                    pcm[i * 2 + 1] = right_pcm[i];
+                                }
+                            } else {
+                                pcm[..actual_len].copy_from_slice(&left_pcm);
+                            }
+
+                            // 3. 编码时依然使用固定的 frame_size
+                            let input_len = config.frame_size * config.channels as usize;
+                            if let Ok(len) = codec.encode(&pcm[..input_len], &mut opus_buf) {
+                                let now = now_us();
+                                if stream_start_ts == 0 {
+                                    // 初始化流开始时间戳
+                                    stream_start_ts = now;
+                                }
+                                let target_ts = stream_start_ts + ((seq) as u128 * frame_duration_us) + delay_us;
                                 let packet = AudioPacket {
+                                    seq,
+                                    timestamp: target_ts,
                                     data: opus_buf[..len].to_vec(),
                                 };
+
                                 let _ = socket.send(&packet, target).await;
+                                seq += 1;
+
+                                // 音频发送时长超过音频播放 1s 时进行等待（控制数据超前缓冲 1s）
+                                if target_ts > now + 1_000_000 {
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                                }
+
+                                return Ok(())
                             }
+
                         }
-                        Err(e) => {
-                            eprintln!("[FilePlayback] Read error: {}", e);
+                        Err(anyhow::anyhow!("Unexpected EOF"))
+                    } => {
+                        if let Err(e) = result {
+                            if e.to_string() == "EOF" {
+                                break;
+                            }
+                            eprintln!("[FilePlayback] Error: {}", e);
                             break;
                         }
                     }
@@ -299,4 +345,3 @@ impl ForwardStream {
         Ok(())
     }
 }
-

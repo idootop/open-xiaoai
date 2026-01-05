@@ -11,10 +11,6 @@ panic = "abort"
 strip = true
 debug = false
 
-[features]
-default = []
-app = []
-
 [dependencies]
 opus = "0.3"
 anyhow = "1.0"
@@ -27,3 +23,6 @@ dashmap = "6.1.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 alsa = "0.11"
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+symphonia = { version = "0.5", features = ["mp3", "wav", "pcm"] }

@@ -45,16 +45,10 @@ pub enum ServerEvent {
     },
 
     /// 客户端加入（广播给其他客户端）
-    ClientJoined {
-        addr: String,
-        model: String,
-    },
+    ClientJoined { addr: String, model: String },
 
     /// 客户端离开
-    ClientLeft {
-        addr: String,
-        model: String,
-    },
+    ClientLeft { addr: String, model: String },
 
     /// 服务器消息/通知
     Notification {
@@ -71,9 +65,7 @@ pub enum ServerEvent {
     },
 
     /// 播放完成
-    PlaybackComplete {
-        filename: String,
-    },
+    PlaybackComplete { filename: String },
 
     /// 服务器状态更新
     ServerStatus {
@@ -82,10 +74,7 @@ pub enum ServerEvent {
     },
 
     /// 自定义事件
-    Custom {
-        name: String,
-        payload: Vec<u8>,
-    },
+    Custom { name: String, payload: Vec<u8> },
 }
 
 /// 客户端事件（Client → Server）
@@ -99,16 +88,10 @@ pub enum ClientEvent {
     },
 
     /// 音频电平
-    AudioLevel {
-        level_db: f32,
-        is_silent: bool,
-    },
+    AudioLevel { level_db: f32, is_silent: bool },
 
     /// 按键事件
-    KeyPress {
-        key: String,
-        action: KeyAction,
-    },
+    KeyPress { key: String, action: KeyAction },
 
     /// 警告/错误
     Alert {
@@ -117,10 +100,7 @@ pub enum ClientEvent {
     },
 
     /// 自定义事件
-    Custom {
-        name: String,
-        payload: Vec<u8>,
-    },
+    Custom { name: String, payload: Vec<u8> },
 }
 
 /// 通知级别
@@ -283,4 +263,3 @@ where
         handler.handle(event).await;
     }
 }
-

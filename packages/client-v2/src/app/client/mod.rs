@@ -25,8 +25,6 @@
 //!                     └─────────────────────────────────────┘
 //! ```
 
-#![cfg(target_os = "linux")]
-
 mod pipeline;
 mod session;
 
@@ -41,6 +39,7 @@ use crate::net::discovery::Discovery;
 use crate::net::event::{ClientEvent, NotificationLevel, ServerEvent};
 use crate::net::network::{AudioSocket, Connection};
 use crate::net::protocol::ControlPacket;
+use crate::net::sync::now_us;
 use anyhow::{Result, anyhow};
 use session::handshake;
 use std::net::SocketAddr;
@@ -57,8 +56,8 @@ pub struct ClientConfig {
     pub client_auth: String,
     /// 服务端认证
     pub server_auth: String,
-    /// 心跳间隔（秒）
-    pub heartbeat_interval: u64,
+    /// 心跳间隔（毫秒）
+    pub heartbeat_ms: u64,
     /// 连接超时（秒）
     pub timeout: u64,
     /// 客户端型号
@@ -75,7 +74,7 @@ impl Default for ClientConfig {
                 .unwrap_or_else(|_| "xiao-server".to_string()),
             client_auth: std::env::var("XIAO_CLIENT_AUTH")
                 .unwrap_or_else(|_| "xiao-client".to_string()),
-            heartbeat_interval: 10,
+            heartbeat_ms: 200,
             timeout: 60,
             // todo 获取设备信息
             model: "Open-XiaoAi-V2".to_string(),
@@ -192,17 +191,21 @@ impl Client {
 
     /// 启动心跳任务
     fn spawn_heartbeat(&self, session: Arc<Session>) {
-        let interval = std::time::Duration::from_secs(self.config.heartbeat_interval);
+        let interval = std::time::Duration::from_millis(self.config.heartbeat_ms);
 
         tokio::spawn(async move {
+            let mut seq = 0;
             let mut ticker = tokio::time::interval(interval);
             loop {
                 tokio::select! {
                     _ = session.cancel.cancelled() => break,
                     _ = ticker.tick() => {
-                        if session.send(&ControlPacket::Ping).await.is_err() {
+                        let t1 = now_us();
+                        let msg = ControlPacket::Ping { client_ts: t1, seq };
+                        if session.send(&msg).await.is_err() {
                             break;
                         }
+                        seq += 1;
                     }
                 }
             }
@@ -238,10 +241,14 @@ impl Client {
     /// 处理控制包
     async fn handle_packet(&self, session: &Arc<Session>, packet: ControlPacket) -> Result<()> {
         match packet {
-            ControlPacket::Ping => {
-                session.send(&ControlPacket::Pong).await?;
+            ControlPacket::Pong {
+                client_ts,
+                server_ts,
+                ..
+            } => {
+                let t4 = now_us();
+                session.update_clock(client_ts, server_ts, t4);
             }
-            ControlPacket::Pong => {}
             ControlPacket::RpcResponse { id, result } => {
                 session.resolve_rpc(id, result);
             }

@@ -51,6 +51,7 @@ use crate::net::discovery::Discovery;
 use crate::net::event::{ClientEvent, ServerEvent, ServerEventBus};
 use crate::net::network::Connection;
 use crate::net::protocol::ControlPacket;
+use crate::net::sync::now_us;
 use anyhow::{Context, Result, anyhow};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -305,10 +306,14 @@ impl Server {
     /// 处理控制包
     async fn handle_packet(&self, session: &Arc<Session>, packet: ControlPacket) -> Result<()> {
         match packet {
-            ControlPacket::Ping => {
-                session.send(&ControlPacket::Pong).await?;
+            ControlPacket::Ping { client_ts, seq } => {
+                let pong = ControlPacket::Pong {
+                    client_ts,
+                    server_ts: now_us(),
+                    seq,
+                };
+                session.send(&pong).await?;
             }
-            ControlPacket::Pong => {}
             ControlPacket::RpcResponse { id, result } => {
                 session.resolve_rpc(id, result);
             }
