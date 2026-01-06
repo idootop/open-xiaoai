@@ -9,24 +9,14 @@ pub struct OpusCodec {
 
 impl OpusCodec {
     pub fn new(config: &AudioConfig) -> Result<Self> {
-        // Opus 仅支持这些采样率，强制进行转换以防万一
         let opus_rate = match config.sample_rate {
-            8000 => 8000,
-            12000 => 12000,
             16000 => 16000,
-            24000 => 24000,
             48000 => 48000,
             _ => {
-                let fallback = if config.sample_rate < 24000 {
-                    16000
-                } else {
-                    48000
-                };
-                println!(
-                    "Warning: Opus does not support {}Hz, falling back to {}Hz",
-                    config.sample_rate, fallback
-                );
-                fallback
+                return Err(anyhow::anyhow!(
+                    "Unsupported sample rate for Opus: {}",
+                    config.sample_rate
+                ));
             }
         };
 

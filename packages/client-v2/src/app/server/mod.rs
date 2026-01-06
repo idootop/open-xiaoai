@@ -512,29 +512,16 @@ impl Server {
         let session = self.sessions.get(&addr).context("Session not found")?;
 
         let reader = WavReader::open(file_path)?;
-        let opus_rate = if reader.sample_rate > 24000 {
-            48000
-        } else {
-            16000
-        };
-
-        let config = AudioConfig {
-            sample_rate: opus_rate,
-            channels: reader.channels,
-            frame_size: (opus_rate / 50) as usize, // 20ms
-            ..AudioConfig::music_48k()
-        };
 
         // 通知客户端准备接收音频
         session
             .send(&ControlPacket::StartPlayback {
-                config: config.clone(),
+                config: reader.config.clone(),
             })
             .await?;
 
         // 创建播放流
         let handle = FilePlaybackStream::spawn(
-            config,
             reader,
             self.audio_bus.socket(),
             session.audio_addr,

@@ -1,4 +1,5 @@
 #![cfg(not(target_os = "linux"))]
+
 use anyhow::{Context, Result};
 use std::fs::File;
 use std::path::Path;
@@ -14,22 +15,22 @@ pub struct AudioReader {
     decoder: Box<dyn Decoder>,
     track_id: u32,
     sample_buf: Option<SampleBuffer<i16>>,
-    channels: usize,
     left_buffer: Vec<i16>,
     right_buffer: Vec<i16>,
+    pub channels: usize,
+    pub sample_rate: u32,
 }
 
 impl AudioReader {
-    pub fn new(path: &str) -> Result<Self> {
+    pub fn new(path: impl AsRef<Path>) -> Result<Self> {
+        let path_ref = path.as_ref();
         let src =
-            File::open(Path::new(path)).context(format!("Failed to open audio file: {}", path))?;
+            File::open(path_ref).context(format!("Failed to open audio file: {:?}", path_ref))?;
         let mss = MediaSourceStream::new(Box::new(src), Default::default());
 
         let mut hint = Hint::new();
-        if path.ends_with(".wav") {
-            hint.with_extension("wav");
-        } else if path.ends_with(".mp3") {
-            hint.with_extension("mp3");
+        if let Some(ext) = path_ref.extension().and_then(|s| s.to_str()) {
+            hint.with_extension(ext);
         }
 
         let probed = symphonia::default::get_probe()
@@ -54,6 +55,7 @@ impl AudioReader {
             .context("Failed to create decoder")?;
 
         let channels = track.codec_params.channels.map(|c| c.count()).unwrap_or(1);
+        let sample_rate = track.codec_params.sample_rate.unwrap_or(44100);
 
         Ok(Self {
             format,
@@ -61,6 +63,7 @@ impl AudioReader {
             track_id,
             sample_buf: None,
             channels,
+            sample_rate,
             left_buffer: Vec::new(),
             right_buffer: Vec::new(),
         })

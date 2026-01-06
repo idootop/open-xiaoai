@@ -28,6 +28,7 @@ use crate::net::protocol::AudioPacket;
 use crate::net::sync::now_us;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
@@ -61,6 +62,96 @@ impl Drop for StreamHandle {
     }
 }
 
+/// 音频流发送控制器
+pub struct StreamSender {
+    socket: Arc<AudioSocket>,
+    target: SocketAddr,
+    codec: OpusCodec,
+
+    // 缓存区：避免重复分配内存
+    opus_buffer: Vec<u8>,
+
+    // 状态变量
+    seq: u32,
+    stream_start_ts: Option<u128>,
+
+    // 配置参数
+    input_len: usize,
+    frame_duration_us: u128,
+    max_lead_us: u128, // 允许的最大超前时间，例如 1_000_000 (1s)
+}
+
+impl StreamSender {
+    pub fn new(
+        config: AudioConfig,
+        socket: Arc<AudioSocket>,
+        target: SocketAddr,
+    ) -> anyhow::Result<Self> {
+        let codec = OpusCodec::new(&config)?;
+        let input_len: usize = config.frame_size * (config.channels as usize);
+
+        // 预分配缓冲区
+        let opus_buffer = vec![0u8; 4096];
+
+        let frame_duration_us =
+            (config.frame_size as f64 / config.sample_rate as f64 * 1_000_000.0) as u128;
+
+        Ok(Self {
+            socket,
+            target,
+            codec,
+            opus_buffer,
+            seq: 0,
+            stream_start_ts: None,
+            input_len,
+            frame_duration_us,
+            max_lead_us: 1_000_000,
+        })
+    }
+
+    /// 发送音频帧
+    pub async fn send(&mut self, pcm_input: &[i16]) -> anyhow::Result<()> {
+        // 0. 处理输入(不足时填充静音)
+        let pcm_buffer = if pcm_input.len() < self.input_len {
+            let mut pcm_buffer = vec![0i16; self.input_len];
+            pcm_buffer[..pcm_input.len()].copy_from_slice(pcm_input);
+            pcm_buffer
+        } else {
+            pcm_input.to_vec()
+        };
+
+        // 1. 编码
+        let encoded_len = self.codec.encode(&pcm_buffer, &mut self.opus_buffer)?;
+
+        // 2. 时间戳处理
+        let now = now_us();
+        let start_ts = *self.stream_start_ts.get_or_insert(now);
+        let target_ts = start_ts + (self.seq as u128 * self.frame_duration_us);
+
+        // 3. 构建并发送
+        let packet = AudioPacket {
+            seq: self.seq,
+            timestamp: target_ts,
+            data: self.opus_buffer[..encoded_len].to_vec(),
+        };
+
+        self.socket.send(&packet, self.target).await?;
+        self.seq += 1;
+
+        // 4. 平滑流控
+        // 如果发送进度超过当前时间 + 允许的缓冲量，则进行睡眠
+        if target_ts > now + self.max_lead_us {
+            let drift = target_ts - (now + self.max_lead_us);
+            let sleep_ms = (drift / 1000).min(100) as u64;
+            if sleep_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+            }
+        }
+
+        Ok(())
+    }
+}
+
 /// 文件播放流 - 从 WAV 文件读取并发送到指定客户端
 pub struct FilePlaybackStream;
 
@@ -74,7 +165,6 @@ impl FilePlaybackStream {
     /// * `target` - 目标客户端地址
     /// * `parent_cancel` - 父级取消令牌（用于 session 级别取消）
     pub fn spawn(
-        config: AudioConfig,
         reader: WavReader,
         socket: Arc<AudioSocket>,
         target: SocketAddr,
@@ -84,7 +174,7 @@ impl FilePlaybackStream {
         let token = cancel.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = Self::run(config, reader, socket, target, token).await {
+            if let Err(e) = Self::run(reader, socket, target, token).await {
                 eprintln!("[FilePlayback] Error: {}", e);
             }
         });
@@ -93,86 +183,32 @@ impl FilePlaybackStream {
     }
 
     async fn run(
-        config: AudioConfig,
         mut reader: WavReader,
         socket: Arc<AudioSocket>,
         target: SocketAddr,
         cancel: CancellationToken,
     ) -> anyhow::Result<()> {
-        #[cfg(not(target_os = "linux"))]
-        {
-            use crate::audio::reader::AudioReader;
-            let mut codec = OpusCodec::new(&config)?;
-            let mut pcm = vec![0i16; config.frame_size * config.channels as usize];
-            let mut opus_buf = vec![0u8; 4096];
+        println!("[FilePlayback] Started -> {}", target);
 
-            println!("[FilePlayback] Started -> {}", target);
+        let mut sender = StreamSender::new(reader.config.clone(), socket, target)?;
 
-            let mut seq = 0u32;
-            let delay_us = 0_000; // 100ms 基础延迟
-
-            let mut stream_start_ts = 0;
-            let frame_duration_us =
-                (config.frame_size as f64 / config.sample_rate as f64 * 1_000_000.0) as u128;
-
-            let mut reader = AudioReader::new("temp/test.wav")?;
-
-            loop {
-                tokio::select! {
-                    _ = cancel.cancelled() => break,
-                    result = async{
-                        if let Some((left_pcm, right_pcm)) = reader.read_chunk(config.frame_size)?{
-                            let actual_len = left_pcm.len();
-
-                            // 1. 先将 pcm 缓冲区清零（处理尾帧时的静音填充）
-                            pcm.fill(0);
-
-                            // 2. 只循环实际读取到的长度
-                            if config.channels == 2 {
-                                for i in 0..actual_len {
-                                    pcm[i * 2] = left_pcm[i];
-                                    pcm[i * 2 + 1] = right_pcm[i];
-                                }
-                            } else {
-                                pcm[..actual_len].copy_from_slice(&left_pcm);
-                            }
-
-                            // 3. 编码时依然使用固定的 frame_size
-                            let input_len = config.frame_size * config.channels as usize;
-                            if let Ok(len) = codec.encode(&pcm[..input_len], &mut opus_buf) {
-                                let now = now_us();
-                                if stream_start_ts == 0 {
-                                    // 初始化流开始时间戳
-                                    stream_start_ts = now;
-                                }
-                                let target_ts = stream_start_ts + ((seq) as u128 * frame_duration_us) + delay_us;
-                                let packet = AudioPacket {
-                                    seq,
-                                    timestamp: target_ts,
-                                    data: opus_buf[..len].to_vec(),
-                                };
-
-                                let _ = socket.send(&packet, target).await;
-                                seq += 1;
-
-                                // 音频发送时长超过音频播放 1s 时进行等待（控制数据超前缓冲 1s）
-                                if target_ts > now + 1_000_000 {
-                                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                                }
-
-                                return Ok(())
-                            }
-
-                        }
-                        Err(anyhow::anyhow!("Unexpected EOF"))
-                    } => {
-                        if let Err(e) = result {
-                            if e.to_string() == "EOF" {
-                                break;
-                            }
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                result = async {
+                    // 读取一帧 PCM 数据
+                    if let Some(pcm) = reader.read_one_frame()? {
+                        // 编码并发送
+                        sender.send(pcm).await
+                    } else {
+                        Err(anyhow::anyhow!("EOF"))
+                    }
+                } => {
+                    if let Err(e) = result {
+                        if e.to_string() != "EOF" {
                             eprintln!("[FilePlayback] Error: {}", e);
-                            break;
                         }
+                        break;
                     }
                 }
             }
@@ -262,86 +298,6 @@ impl RecorderStream {
         // 确保正确关闭文件
         writer.finalize()?;
         println!("[Recorder] Stopped, file saved: {}", filename);
-        Ok(())
-    }
-}
-
-/// 音频转发流 - 从总线订阅并转发到指定客户端
-/// 用于实现"监听"功能或者服务端音频源推送
-pub struct ForwardStream;
-
-impl ForwardStream {
-    /// 启动转发流
-    ///
-    /// # Arguments
-    /// * `socket` - UDP socket
-    /// * `target` - 目标地址
-    /// * `bus_rx` - 音频总线接收器
-    /// * `source_filter` - 源过滤（可选）
-    /// * `parent_cancel` - 父级取消令牌
-    pub fn spawn(
-        socket: Arc<AudioSocket>,
-        target: SocketAddr,
-        bus_rx: broadcast::Receiver<AudioFrame>,
-        source_filter: Option<SocketAddr>,
-        parent_cancel: CancellationToken,
-    ) -> StreamHandle {
-        let cancel = parent_cancel.child_token();
-        let token = cancel.clone();
-
-        tokio::spawn(async move {
-            if let Err(e) = Self::run(socket, target, bus_rx, source_filter, token).await {
-                eprintln!("[Forward] Error: {}", e);
-            }
-        });
-
-        StreamHandle::new(cancel)
-    }
-
-    async fn run(
-        socket: Arc<AudioSocket>,
-        target: SocketAddr,
-        mut bus_rx: broadcast::Receiver<AudioFrame>,
-        source_filter: Option<SocketAddr>,
-        cancel: CancellationToken,
-    ) -> anyhow::Result<()> {
-        println!(
-            "[Forward] Started -> {} (filter: {:?})",
-            target, source_filter
-        );
-
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => break,
-                result = bus_rx.recv() => {
-                    match result {
-                        Ok(frame) => {
-                            // 应用源过滤
-                            if let Some(filter_addr) = &source_filter {
-                                if frame.source.as_ref() != Some(filter_addr) {
-                                    continue;
-                                }
-                            }
-
-                            // 不转发给自己
-                            if frame.source.as_ref() == Some(&target) {
-                                continue;
-                            }
-
-                            let _ = socket.send(&frame.packet, target).await;
-                        }
-                        Err(broadcast::error::RecvError::Lagged(n)) => {
-                            eprintln!("[Forward] Lagged {} frames", n);
-                        }
-                        Err(broadcast::error::RecvError::Closed) => {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        println!("[Forward] Stopped");
         Ok(())
     }
 }

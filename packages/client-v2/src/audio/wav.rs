@@ -1,6 +1,7 @@
+use crate::audio::config::AudioConfig;
 use anyhow::Result;
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufWriter, Seek, SeekFrom, Write};
 
 pub struct WavWriter {
     writer: BufWriter<File>,
@@ -64,72 +65,67 @@ impl WavWriter {
 }
 
 pub struct WavReader {
-    reader: BufReader<File>,
-    pub sample_rate: u32,
-    pub channels: u16,
-    pub data_size: u32,
+    #[cfg(not(target_os = "linux"))]
+    reader: crate::audio::reader::AudioReader,
+    pcm_buffer: Vec<i16>,
+    pub config: AudioConfig,
 }
 
 impl WavReader {
     pub fn open(path: &str) -> Result<Self> {
-        let file = File::open(path)?;
-        let mut reader = BufReader::new(file);
-        let mut header = [0u8; 44];
-        reader.read_exact(&mut header)?;
+        #[cfg(not(target_os = "linux"))]
+        {
+            let reader = crate::audio::reader::AudioReader::new(path)?;
+            let channels = reader.channels as u16;
 
-        if &header[0..4] != b"RIFF" || &header[8..12] != b"WAVE" {
-            return Err(anyhow::anyhow!("Not a WAV file"));
+            let config = AudioConfig {
+                channels,
+                sample_rate: reader.sample_rate,
+                frame_size: reader.sample_rate as usize / 50, // 20ms
+                ..AudioConfig::music_48k()
+            };
+
+            let input_len = config.frame_size * (channels as usize);
+
+            Ok(Self {
+                reader,
+                config,
+                pcm_buffer: vec![0i16; input_len],
+            })
         }
-
-        let channels = u16::from_le_bytes([header[22], header[23]]);
-        let sample_rate = u32::from_le_bytes([header[24], header[25], header[26], header[27]]);
-        let data_size = u32::from_le_bytes([header[40], header[41], header[42], header[43]]);
-
-        Ok(Self {
-            reader,
-            sample_rate,
-            channels,
-            data_size,
-        })
+        #[cfg(target_os = "linux")]
+        {
+            Err(anyhow::anyhow!(
+                "WavReader is only supported on non-Linux platforms"
+            ))
+        }
     }
 
-    /// 读取指定的采样数。如果是立体声，则返回左右声道独立的 Vec。
-    /// chunk_size: 每个声道需要读取的采样点数。
-    pub fn read_chunk(&mut self, chunk_size: usize) -> Result<Option<(Vec<i16>, Vec<i16>)>> {
-        let channels = self.channels as usize;
-        let total_samples_to_read = chunk_size * channels;
-        let mut bytes = vec![0u8; total_samples_to_read * 2]; // 预分配完整大小的字节数组
-        
-        let bytes_read = self.reader.read(&mut bytes)?;
-        
-        // 如果连 1 字节都没读到，说明到文件结尾了
-        if bytes_read == 0 {
-            return Ok(None);
-        }
-
-        let mut left = vec![0i16; chunk_size];   // 预填 0
-        let mut right = vec![0i16; chunk_size];  // 预填 0
-
-        // 实际读到了多少个采样点（总数）
-        let total_samples_read = bytes_read / 2;
-        // 计算每个声道实际读到了多少个点
-        let samples_per_channel = total_samples_read / channels;
-
-        for i in 0..samples_per_channel {
-            let base = i * channels * 2;
-            
-            // 左声道 (或单声道)
-            left[i] = i16::from_le_bytes([bytes[base], bytes[base + 1]]);
-
-            if channels == 2 {
-                // 右声道
-                right[i] = i16::from_le_bytes([bytes[base + 2], bytes[base + 3]]);
-            } else {
-                // 单声道填充双声道时，复制左声道
-                right[i] = left[i];
+    pub fn read_one_frame(&mut self) -> Result<Option<&[i16]>> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            match self.reader.read_chunk(self.config.frame_size)? {
+                Some((left_pcm, right_pcm)) => {
+                    let actual_len = left_pcm.len();
+                    if self.config.channels == 2 {
+                        for i in 0..actual_len {
+                            self.pcm_buffer[i * 2] = left_pcm[i];
+                            self.pcm_buffer[i * 2 + 1] = right_pcm[i];
+                        }
+                    } else {
+                        self.pcm_buffer[..actual_len].copy_from_slice(&left_pcm);
+                    }
+                    let total_len = actual_len * (self.config.channels as usize);
+                    Ok(Some(&self.pcm_buffer[..total_len]))
+                }
+                None => Ok(None),
             }
         }
-
-        Ok(Some((left, right)))
+        #[cfg(target_os = "linux")]
+        {
+            Err(anyhow::anyhow!(
+                "WavReader is only supported on non-Linux platforms"
+            ))
+        }
     }
 }
