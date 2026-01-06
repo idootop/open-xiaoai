@@ -4,7 +4,7 @@
 
 use crate::audio::config::AudioConfig;
 use crate::net::command::{Command, CommandResult};
-use crate::net::event::{ClientEvent, ServerEvent};
+use crate::net::event::EventData;
 use serde::{Deserialize, Serialize};
 
 // ==================== 基础类型 ====================
@@ -63,31 +63,20 @@ pub enum ControlPacket {
     },
 
     // ========== RPC ==========
-    /// RPC 请求（新版，使用 Command 类型）
     RpcRequest {
         id: u32,
         command: Command,
     },
-    /// RPC 响应（新版，使用 CommandResult 类型）
     RpcResponse {
         id: u32,
         result: CommandResult,
     },
 
     // ========== 事件 ==========
-    /// 服务端事件推送
-    ServerEvent(ServerEvent),
-    /// 客户端事件推送
-    ClientEvent(ClientEvent),
-
-    // ========== 订阅管理 ==========
-    /// 订阅事件类型
-    Subscribe {
-        event_types: Vec<String>,
-    },
-    /// 取消订阅
-    Unsubscribe {
-        event_types: Vec<String>,
+    Event {
+        /// 微秒时间戳
+        timestamp: u128,
+        data: EventData,
     },
 
     // ========== 音频控制 ==========

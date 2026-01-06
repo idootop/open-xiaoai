@@ -48,7 +48,7 @@ use crate::net::command::{
     AudioState, Command, CommandError, CommandResult, DeviceInfo, ShellResponse,
 };
 use crate::net::discovery::Discovery;
-use crate::net::event::{ClientEvent, ServerEvent, ServerEventBus};
+use crate::net::event::{EventBus, EventBusSubscription, EventData};
 use crate::net::network::Connection;
 use crate::net::protocol::ControlPacket;
 use crate::net::sync::now_us;
@@ -92,7 +92,7 @@ pub struct Server {
     /// 音频总线
     audio_bus: Arc<AudioBus>,
     /// 服务端事件总线
-    event_bus: Arc<ServerEventBus>,
+    event_bus: Arc<EventBus>,
     /// 服务器取消令牌
     cancel: CancellationToken,
     /// 服务器启动时间
@@ -108,15 +108,15 @@ impl Server {
             config,
             sessions: Arc::new(SessionManager::new()),
             audio_bus,
-            event_bus: Arc::new(ServerEventBus::default()),
+            event_bus: Arc::new(EventBus::default()),
             cancel: CancellationToken::new(),
             started_at: std::time::Instant::now(),
         })
     }
 
-    /// 获取事件总线（用于外部订阅）
-    pub fn event_bus(&self) -> Arc<ServerEventBus> {
-        self.event_bus.clone()
+    /// 订阅事件
+    pub fn subscribe_events(&self) -> EventBusSubscription {
+        self.event_bus.subscribe()
     }
 
     /// 启动服务器
@@ -199,43 +199,12 @@ impl Server {
         self.sessions.register(session.clone());
         self.audio_bus.register(audio_addr, true);
 
-        // 发布客户端加入事件
-        self.event_bus.publish(ServerEvent::ClientJoined {
-            addr: addr.to_string(),
-            model: info.model.clone(),
-        });
-
-        // 广播给其他客户端
-        self.sessions
-            .broadcast_except(
-                &ControlPacket::ServerEvent(ServerEvent::ClientJoined {
-                    addr: addr.to_string(),
-                    model: info.model.clone(),
-                }),
-                &addr,
-            )
-            .await;
-
         // --- 主循环 ---
         let result = self.session_loop(session.clone()).await;
 
         // --- 清理 ---
         self.audio_bus.unregister(&audio_addr);
         self.sessions.unregister(&addr);
-
-        // 发布客户端离开事件
-        self.event_bus.publish(ServerEvent::ClientLeft {
-            addr: addr.to_string(),
-            model: info.model.clone(),
-        });
-
-        // 广播给其他客户端
-        self.sessions
-            .broadcast(&ControlPacket::ServerEvent(ServerEvent::ClientLeft {
-                addr: addr.to_string(),
-                model: info.model,
-            }))
-            .await;
 
         result
     }
@@ -314,18 +283,20 @@ impl Server {
                 };
                 session.send(&pong).await?;
             }
+            ControlPacket::Event { timestamp, data } => {
+                self.event_bus.receive(data, timestamp, session.id());
+            }
             ControlPacket::RpcResponse { id, result } => {
                 session.resolve_rpc(id, result);
             }
+            // todo 耗时任务，异步响应
             ControlPacket::RpcRequest { id, command } => {
                 let result = self.handle_command(session, command).await;
                 session
                     .send(&ControlPacket::RpcResponse { id, result })
                     .await?;
             }
-            ControlPacket::ClientEvent(event) => {
-                self.handle_client_event(session, event).await;
-            }
+
             _ => {}
         }
         Ok(())
@@ -376,30 +347,6 @@ impl Server {
         }
     }
 
-    /// 处理客户端事件
-    async fn handle_client_event(&self, session: &Arc<Session>, event: ClientEvent) {
-        match &event {
-            ClientEvent::Alert { level, message } => {
-                println!(
-                    "[Event] Alert from {}: [{:?}] {}",
-                    session.tcp_addr, level, message
-                );
-            }
-            ClientEvent::AudioLevel {
-                level_db,
-                is_silent,
-            } => {
-                println!(
-                    "[Event] Audio level from {}: {:.1}dB (silent: {})",
-                    session.tcp_addr, level_db, is_silent
-                );
-            }
-            _ => {}
-        }
-
-        // 可以在这里将客户端事件转发给其他订阅者
-    }
-
     // ==================== 公开 API ====================
 
     /// 获取所有已连接的客户端地址
@@ -433,19 +380,16 @@ impl Server {
         }
     }
 
-    /// 推送事件给所有客户端
-    pub async fn broadcast_event(&self, event: ServerEvent) {
-        self.event_bus.publish(event.clone());
-        self.sessions
-            .broadcast(&ControlPacket::ServerEvent(event))
-            .await;
-    }
-
-    /// 推送事件给指定客户端
-    pub async fn send_event(&self, addr: SocketAddr, event: ServerEvent) -> Result<()> {
+    /// 发送事件
+    pub async fn send_event(&self, addr: SocketAddr, event: EventData) -> Result<()> {
         let session = self.sessions.get(&addr).context("Session not found")?;
-        self.event_bus.publish_to(addr, event.clone());
-        session.send(&ControlPacket::ServerEvent(event)).await
+        session
+            .send(&ControlPacket::Event {
+                timestamp: now_us(),
+                data: event,
+            })
+            .await?;
+        Ok(())
     }
 
     /// 开始录音
@@ -473,16 +417,6 @@ impl Server {
             .send(&ControlPacket::StartRecording { config })
             .await?;
 
-        // 发布事件
-        session
-            .send(&ControlPacket::ServerEvent(
-                ServerEvent::AudioStatusChanged {
-                    is_recording: true,
-                    is_playing: session.is_playing(),
-                },
-            ))
-            .await?;
-
         println!("[Server] Recording started for {} -> {}", addr, filename);
         Ok(())
     }
@@ -492,16 +426,6 @@ impl Server {
         let session = self.sessions.get(&addr).context("Session not found")?;
         session.stop_recording();
         session.send(&ControlPacket::StopRecording).await?;
-
-        // 发布事件
-        session
-            .send(&ControlPacket::ServerEvent(
-                ServerEvent::AudioStatusChanged {
-                    is_recording: false,
-                    is_playing: session.is_playing(),
-                },
-            ))
-            .await?;
 
         println!("[Server] Recording stopped for {}", addr);
         Ok(())
@@ -530,16 +454,6 @@ impl Server {
 
         session.start_playback(handle);
 
-        // 发布事件
-        session
-            .send(&ControlPacket::ServerEvent(
-                ServerEvent::AudioStatusChanged {
-                    is_recording: session.is_recording(),
-                    is_playing: true,
-                },
-            ))
-            .await?;
-
         println!("[Server] Playback started for {} from {}", addr, file_path);
         Ok(())
     }
@@ -549,16 +463,6 @@ impl Server {
         let session = self.sessions.get(&addr).context("Session not found")?;
         session.stop_playback();
         session.send(&ControlPacket::StopPlayback).await?;
-
-        // 发布事件
-        session
-            .send(&ControlPacket::ServerEvent(
-                ServerEvent::AudioStatusChanged {
-                    is_recording: session.is_recording(),
-                    is_playing: false,
-                },
-            ))
-            .await?;
 
         println!("[Server] Playback stopped for {}", addr);
         Ok(())

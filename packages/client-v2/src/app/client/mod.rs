@@ -36,7 +36,7 @@ use crate::net::command::{
     ShellResponse,
 };
 use crate::net::discovery::Discovery;
-use crate::net::event::{ClientEvent, NotificationLevel, ServerEvent};
+use crate::net::event::{EventBus, EventBusSubscription, EventData};
 use crate::net::network::{AudioSocket, Connection};
 use crate::net::protocol::ControlPacket;
 use crate::net::sync::now_us;
@@ -44,7 +44,7 @@ use anyhow::{Result, anyhow};
 use session::handshake;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 /// 客户端配置
@@ -91,19 +91,18 @@ pub struct Client {
     session: RwLock<Option<Arc<Session>>>,
     /// 全局取消令牌
     cancel: CancellationToken,
-    /// 服务端事件广播
-    server_events: broadcast::Sender<ServerEvent>,
+    /// 事件总线
+    event_bus: Arc<EventBus>,
 }
 
 impl Client {
     /// 创建新客户端
     pub fn new(config: ClientConfig) -> Self {
-        let (server_events, _) = broadcast::channel(64);
         Self {
             config,
             session: RwLock::new(None),
             cancel: CancellationToken::new(),
-            server_events,
+            event_bus: Arc::new(EventBus::default()),
         }
     }
 
@@ -112,9 +111,9 @@ impl Client {
         Self::new(ClientConfig::default())
     }
 
-    /// 订阅服务端事件
-    pub fn subscribe_events(&self) -> broadcast::Receiver<ServerEvent> {
-        self.server_events.subscribe()
+    /// 订阅事件
+    pub fn subscribe_events(&self) -> EventBusSubscription {
+        self.event_bus.subscribe()
     }
 
     /// 运行客户端（自动发现服务器并连接）
@@ -249,17 +248,18 @@ impl Client {
                 let t4 = now_us();
                 session.update_clock(client_ts, server_ts, t4);
             }
+            ControlPacket::Event { timestamp, data } => {
+                self.event_bus.receive(data, timestamp, session.id());
+            }
             ControlPacket::RpcResponse { id, result } => {
                 session.resolve_rpc(id, result);
             }
+            // todo 耗时任务，异步响应
             ControlPacket::RpcRequest { id, command } => {
                 let result = self.handle_command(session, command).await;
                 session
                     .send(&ControlPacket::RpcResponse { id, result })
                     .await?;
-            }
-            ControlPacket::ServerEvent(event) => {
-                self.handle_server_event(session, event).await;
             }
             ControlPacket::StartRecording { config } => {
                 println!("[Client] Starting recording...");
@@ -360,39 +360,6 @@ impl Client {
         })
     }
 
-    /// 处理服务端事件
-    async fn handle_server_event(&self, _session: &Arc<Session>, event: ServerEvent) {
-        // 广播给订阅者
-        let _ = self.server_events.send(event.clone());
-
-        // 本地处理
-        match &event {
-            ServerEvent::Notification {
-                level,
-                title,
-                message,
-            } => {
-                println!("[Event] [{:?}] {}: {}", level, title, message);
-            }
-            ServerEvent::AudioStatusChanged {
-                is_recording,
-                is_playing,
-            } => {
-                println!(
-                    "[Event] Audio status: recording={}, playing={}",
-                    is_recording, is_playing
-                );
-            }
-            ServerEvent::ClientJoined { addr, model } => {
-                println!("[Event] Client joined: {} ({})", model, addr);
-            }
-            ServerEvent::ClientLeft { addr, model } => {
-                println!("[Event] Client left: {} ({})", model, addr);
-            }
-            _ => {}
-        }
-    }
-
     /// 清理资源
     async fn cleanup(&self) {
         let mut session_guard = self.session.write().await;
@@ -424,23 +391,19 @@ impl Client {
         }
     }
 
-    /// 发送客户端事件
-    pub async fn send_event(&self, event: ClientEvent) -> Result<()> {
+    /// 发送事件
+    pub async fn send_event(&self, event: EventData) -> Result<()> {
         let session_guard = self.session.read().await;
         if let Some(session) = session_guard.as_ref() {
-            session.send(&ControlPacket::ClientEvent(event)).await
+            session
+                .send(&ControlPacket::Event {
+                    timestamp: now_us(),
+                    data: event,
+                })
+                .await
         } else {
             Err(anyhow!("Not connected"))
         }
-    }
-
-    /// 发送警告事件
-    pub async fn send_alert(&self, level: NotificationLevel, message: &str) -> Result<()> {
-        self.send_event(ClientEvent::Alert {
-            level,
-            message: message.to_string(),
-        })
-        .await
     }
 
     /// 检查是否已连接

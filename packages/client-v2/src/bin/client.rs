@@ -9,7 +9,7 @@
 use std::sync::Arc;
 use xiao::app::client::{Client, ClientConfig};
 use xiao::net::command::Command;
-use xiao::net::event::NotificationLevel;
+use xiao::net::event::EventData;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -29,8 +29,13 @@ async fn main() -> anyhow::Result<()> {
     let event_client = client.clone();
     tokio::spawn(async move {
         let mut rx = event_client.subscribe_events();
-        while let Ok(event) = rx.recv().await {
-            println!("📨 [ServerEvent] {:?}", event);
+        while let Some((event, ts, addr)) = rx.recv().await {
+            match event {
+                EventData::Hello { message, .. } => {
+                    println!("[Event] Hello: {} ts:{} addr:{}", message, ts, addr);
+                }
+                _ => {}
+            }
         }
     });
 
@@ -71,13 +76,15 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // 3. 发送客户端事件
-    println!("\n3️⃣  Sending alert event to server...");
+    println!("\n3️⃣  Sending event to server...");
     match client
-        .send_alert(NotificationLevel::Info, "Client started successfully!")
+        .send_event(EventData::Hello {
+            message: "from client!".to_string(),
+        })
         .await
     {
-        Ok(_) => println!("   ✅ Alert sent"),
-        Err(e) => println!("   ❌ Failed to send alert: {}", e),
+        Ok(_) => println!("   ✅ Event sent"),
+        Err(e) => println!("   ❌ Failed to send event: {}", e),
     }
 
     println!("\n═══════════════════════════════════════════════════════");

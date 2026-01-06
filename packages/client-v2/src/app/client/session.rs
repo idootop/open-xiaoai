@@ -129,6 +129,11 @@ impl Session {
         }
     }
 
+    /// 获取会话 ID（使用 TCP 地址）
+    pub fn id(&self) -> SocketAddr {
+        self.conn.peer_addr()
+    }
+
     /// 检查会话是否仍然有效
     pub fn is_alive(&self) -> bool {
         !self.cancel.is_cancelled()

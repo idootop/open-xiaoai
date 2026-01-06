@@ -10,7 +10,7 @@ use std::sync::Arc;
 use xiao::app::server::{Server, ServerConfig};
 use xiao::audio::config::AudioConfig;
 use xiao::net::command::Command;
-use xiao::net::event::{NotificationLevel, ServerEvent};
+use xiao::net::event::EventData;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -37,14 +37,11 @@ async fn main() -> anyhow::Result<()> {
     // 启动事件监听器
     let event_server = server.clone();
     tokio::spawn(async move {
-        let mut rx = event_server.event_bus().subscribe();
-        while let Some((addr, event)) = rx.recv().await {
+        let mut rx = event_server.subscribe_events();
+        while let Some((event, ts, addr)) = rx.recv().await {
             match event {
-                ServerEvent::ClientJoined { model, .. } => {
-                    println!("📱 [Event] Client joined: {} ({:?})", model, addr);
-                }
-                ServerEvent::ClientLeft { model, .. } => {
-                    println!("📴 [Event] Client left: {} ({:?})", model, addr);
+                EventData::Hello { message, .. } => {
+                    println!("[Event] Hello: {} ts:{} addr:{}", message, ts, addr);
                 }
                 _ => {}
             }
@@ -92,16 +89,20 @@ async fn main() -> anyhow::Result<()> {
             Err(e) => println!("   ❌ Shell failed: {}", e),
         }
 
-        // 4. 测试事件广播
+        // 4. 测试事件
         println!("\n4️⃣  Broadcasting notification event...");
-        server
-            .broadcast_event(ServerEvent::Notification {
-                level: NotificationLevel::Info,
-                title: "Test".to_string(),
-                message: "This is a test notification from server".to_string(),
-            })
-            .await;
-        println!("   ✅ Event broadcasted");
+        match server
+            .send_event(
+                addr,
+                EventData::Hello {
+                    message: "from server!".to_string(),
+                },
+            )
+            .await
+        {
+            Ok(_) => println!("   ✅ Event sent"),
+            Err(e) => println!("   ❌ Failed to send event: {}", e),
+        }
 
         // 5. 测试音频录制
         println!("\n5️⃣  Testing Audio Recording (10 seconds)...");

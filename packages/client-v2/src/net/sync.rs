@@ -35,7 +35,6 @@ pub struct ClockSync {
 struct OffsetSample {
     offset: i128,
     rtt: i128,
-    timestamp: u128,
 }
 
 #[derive(Clone, Copy)]
@@ -96,7 +95,6 @@ impl ClockSync {
         let sample = OffsetSample {
             offset,
             rtt,
-            timestamp: client_recv_ts,
         };
         self.offsets.push_back(sample);
         if self.offsets.len() > self.window_size {
