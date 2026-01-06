@@ -78,7 +78,7 @@ pub struct StreamSender {
     // 配置参数
     input_len: usize,
     frame_duration_us: u128,
-    max_lead_us: u128, // 允许的最大超前时间，例如 1_000_000 (1s)
+    max_lead_us: u128, // 允许的最大超前时间，例如 500_000 (1s)
 }
 
 impl StreamSender {
@@ -105,7 +105,7 @@ impl StreamSender {
             stream_start_ts: None,
             input_len,
             frame_duration_us,
-            max_lead_us: 1_000_000,
+            max_lead_us: 500_000,
         })
     }
 
@@ -259,7 +259,7 @@ impl RecorderStream {
     ) -> anyhow::Result<()> {
         let mut writer = WavWriter::create(&filename, config.sample_rate, config.channels)?;
         let mut codec = OpusCodec::new(&config)?;
-        let mut pcm = vec![0i16; config.frame_size];
+        let mut pcm = vec![0i16; config.frame_size * config.channels as usize];
 
         println!(
             "[Recorder] Started -> {} (filter: {:?})",
@@ -280,8 +280,9 @@ impl RecorderStream {
                             }
 
                             // 解码并写入
-                            if let Ok(n) = codec.decode(&frame.packet.data, &mut pcm) {
-                                let _ = writer.write_samples(&pcm[..n]);
+                            if let Ok(samples_per_channel) = codec.decode(&frame.packet.data, &mut pcm) {
+                                let total_samples = samples_per_channel * config.channels as usize;
+                                let _ = writer.write_samples(&pcm[..total_samples])?;
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(n)) => {

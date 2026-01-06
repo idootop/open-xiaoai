@@ -103,13 +103,25 @@ async fn main() -> anyhow::Result<()> {
             .await;
         println!("   ✅ Event broadcasted");
 
+        // 5. 测试音频录制
+        println!("\n5️⃣  Testing Audio Recording (10 seconds)...");
+        match server.start_record(addr, AudioConfig::voice_16k()).await {
+            Ok(_) => {
+                println!("   ⏺️  Recording started...");
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                server.stop_record(addr).await?;
+                println!("   ⏹️  Recording stopped");
+            }
+            Err(e) => println!("   ❌ Recording failed: {}", e),
+        }
+
         // 6. 测试音频播放（如果有测试文件）
         println!("\n6️⃣  Testing Audio Playback...");
         if std::path::Path::new("temp/test.wav").exists() {
             match server.start_play(addr, "temp/test.wav").await {
                 Ok(_) => {
                     println!("   ▶️  Playback started...");
-                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                     server.stop_play(addr).await?;
                     println!("   ⏹️  Playback stopped");
                 }
@@ -117,18 +129,6 @@ async fn main() -> anyhow::Result<()> {
             }
         } else {
             println!("   ⚠️  No test file found at temp/test.wav, skipping...");
-        }
-
-        // 5. 测试音频录制
-        println!("\n5️⃣  Testing Audio Recording (5 seconds)...");
-        match server.start_record(addr, AudioConfig::voice_16k()).await {
-            Ok(_) => {
-                println!("   ⏺️  Recording started...");
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                server.stop_record(addr).await?;
-                println!("   ⏹️  Recording stopped");
-            }
-            Err(e) => println!("   ❌ Recording failed: {}", e),
         }
 
         println!("\n═══════════════════════════════════════════════════════");

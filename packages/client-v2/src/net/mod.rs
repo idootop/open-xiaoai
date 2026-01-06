@@ -7,10 +7,13 @@
 //! - `network` - 底层网络连接
 //! - `protocol` - 通信协议定义
 //! - `rpc` - RPC 调用管理
+//! - `sync` - 时间同步工具
+//! - `jitter_buffer` - 抖动缓冲区实现
 
 pub mod command;
 pub mod discovery;
 pub mod event;
+pub mod jitter_buffer;
 pub mod network;
 pub mod protocol;
 pub mod rpc;

@@ -22,13 +22,12 @@ use crate::audio::codec::OpusCodec;
 use crate::audio::config::AudioConfig;
 use crate::audio::player::AudioPlayer;
 use crate::audio::recorder::AudioRecorder;
+use crate::net::jitter_buffer::{JitterBuffer, JitterConfig};
 use crate::net::network::AudioSocket;
 use crate::net::protocol::AudioPacket;
 use crate::net::sync::now_us;
-use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -36,18 +35,15 @@ use tokio_util::sync::CancellationToken;
 /// 管道句柄 - 用于控制正在运行的音频管道
 pub struct PipelineHandle {
     cancel: CancellationToken,
-    /// 用于通知阻塞线程停止
-    stop_flag: Arc<AtomicBool>,
 }
 
 impl PipelineHandle {
-    fn new(cancel: CancellationToken, stop_flag: Arc<AtomicBool>) -> Self {
-        Self { cancel, stop_flag }
+    fn new(cancel: CancellationToken) -> Self {
+        Self { cancel }
     }
 
     /// 停止管道
     pub fn stop(&self) {
-        self.stop_flag.store(true, Ordering::SeqCst);
         self.cancel.cancel();
     }
 
@@ -82,13 +78,12 @@ impl RecordPipeline {
         parent_cancel: CancellationToken,
     ) -> PipelineHandle {
         let cancel = parent_cancel.child_token();
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        let handle = PipelineHandle::new(cancel.clone(), stop_flag.clone());
+        let handle = PipelineHandle::new(cancel.clone());
 
         let token = cancel.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = Self::run(config, socket, target, token, stop_flag).await {
+            if let Err(e) = Self::run(config, socket, target, token).await {
                 eprintln!("[RecordPipeline] Error: {}", e);
             }
         });
@@ -101,15 +96,13 @@ impl RecordPipeline {
         socket: Arc<AudioSocket>,
         target: SocketAddr,
         cancel: CancellationToken,
-        stop_flag: Arc<AtomicBool>,
     ) -> anyhow::Result<()> {
         // 创建 PCM 数据通道
         let (pcm_tx, mut pcm_rx) = mpsc::channel::<Vec<i16>>(32);
 
         // 启动 ALSA 录音线程（阻塞 I/O）
         let recorder_config = config.clone();
-        let recorder_stop = stop_flag.clone();
-
+        let channels = recorder_config.channels as usize;
         std::thread::spawn(move || {
             let recorder = match AudioRecorder::new(&recorder_config) {
                 Ok(r) => r,
@@ -119,13 +112,17 @@ impl RecordPipeline {
                 }
             };
 
-            let mut buf = vec![0i16; recorder_config.frame_size];
+            let mut buf =
+                vec![0i16; recorder_config.frame_size * recorder_config.channels as usize];
 
-            // 使用 stop_flag 来优雅退出
-            while !recorder_stop.load(Ordering::SeqCst) {
+            loop {
                 match recorder.read(&mut buf) {
                     Ok(n) if n > 0 => {
-                        if pcm_tx.blocking_send(buf[..n].to_vec()).is_err() {
+                        let actual_samples = n * channels;
+                        if pcm_tx
+                            .blocking_send(buf[..actual_samples].to_vec())
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -153,11 +150,11 @@ impl RecordPipeline {
                 pcm = pcm_rx.recv() => {
                     match pcm {
                         Some(samples) => {
-                            if let Ok(len) = codec.encode(&samples, &mut opus_buf) {
+                            if let Ok(encoded_len) = codec.encode(&samples, &mut opus_buf) {
                                 let packet = AudioPacket {
                                     seq: 0,
                                     timestamp: 0,
-                                    data: opus_buf[..len].to_vec(),
+                                    data: opus_buf[..encoded_len].to_vec(),
                                 };
                                 let _ = socket.send(&packet, target).await;
                             }
@@ -189,17 +186,17 @@ impl PlaybackPipeline {
     /// * `parent_cancel` - 父级取消令牌
     pub fn spawn(
         config: AudioConfig,
+        clock: Arc<parking_lot::Mutex<crate::net::sync::ClockSync>>,
         socket: Arc<AudioSocket>,
         parent_cancel: CancellationToken,
     ) -> PipelineHandle {
         let cancel = parent_cancel.child_token();
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        let handle = PipelineHandle::new(cancel.clone(), stop_flag.clone());
+        let handle = PipelineHandle::new(cancel.clone());
 
         let token = cancel.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = Self::run(config, socket, token, stop_flag).await {
+            if let Err(e) = Self::run(config, clock, socket, token).await {
                 eprintln!("[PlaybackPipeline] Error: {}", e);
             }
         });
@@ -209,91 +206,72 @@ impl PlaybackPipeline {
 
     async fn run(
         config: AudioConfig,
+        clock: Arc<parking_lot::Mutex<crate::net::sync::ClockSync>>,
         socket: Arc<AudioSocket>,
         cancel: CancellationToken,
-        stop_flag: Arc<AtomicBool>,
     ) -> anyhow::Result<()> {
-        // 创建 PCM 数据通道
-        let (pcm_tx, pcm_rx) = mpsc::channel::<AudioPacket>(128);
+        // 1. 创建 PCM 通道
+        let (pcm_tx, mut pcm_rx) = mpsc::channel::<Vec<i16>>(64);
 
-        // 启动 ALSA 播放线程（阻塞 I/O）
+        // 2. 专用播放线程
         let player_config = config.clone();
-        let player_stop = stop_flag.clone();
+        std::thread::spawn(move || {
+            let player = match AudioPlayer::new(&player_config) {
+                Ok(p) => p,
+                Err(e) => return eprintln!("[PlaybackPipeline] Player init error: {}", e),
+            };
 
-        println!("[PlaybackPipeline] Started");
-
-        // 主循环：从 UDP 接收，解码后发送给播放线程
-        let mut udp_buf = vec![0u8; 4096];
-        let mut last_time = now_us();
-        tokio::spawn(async move {
-            loop {
-                match socket.recv(&mut udp_buf).await {
-                    Ok((packet, _src)) => {
-                        let now = now_us();
-                        let diff = now - last_time;
-                        println!("Received packet now:{} diff:{}ms", now, diff / 1000);
-                        last_time = now;
-
-                        if let Err(e) = pcm_tx.send(packet).await {
-                            eprintln!("[PlaybackPipeline] PCM channel send error: {}", e);
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("[PlaybackPipeline] Recv error: {}", e);
-                    }
+            // 当 pcm_tx 在异步任务中被 drop，这里会自动退出
+            while let Some(samples) = pcm_rx.blocking_recv() {
+                if let Err(e) = player.write(&samples) {
+                    eprintln!("[PlaybackPipeline] Write error: {}", e);
+                    break;
                 }
             }
+            println!("[PlaybackPipeline] Player thread exited naturally");
         });
 
-        let player = match AudioPlayer::new(&player_config) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("[PlaybackPipeline] Failed to create player: {}", e);
-                return Err(e);
-            }
-        };
+        // 3. Opus 解码器与 Jitter Buffer
+        let mut codec = OpusCodec::new(&config)?;
+        let mut jitter_buffer = JitterBuffer::new(JitterConfig::default());
+        let mut pcm_frame = vec![0i16; config.frame_size * config.channels as usize];
 
-        // 使用 blocking_recv 在线程中接收
-        let mut rx = pcm_rx;
-        // 创建 Opus 解码器
-        let mut codec = OpusCodec::new(&config).unwrap();
-        let mut pcm_buf = vec![0i16; config.frame_size * config.channels as usize];
+        // 提高定时精度
+        let mut ticker = tokio::time::interval(std::time::Duration::from_millis(5));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-        let mut jitter_buffer: VecDeque<AudioPacket> = VecDeque::new();
+        println!("[PlaybackPipeline] Running");
 
-        let mut start_time = 0u128;
-        let frame_duration_us =
-            (config.frame_size as f64 / config.sample_rate as f64 * 1_000_000.0) as u128;
-
-        while !player_stop.load(Ordering::SeqCst) {
-            while let Ok(p) = rx.try_recv() {
-                jitter_buffer.push_back(p);
-            }
-            if let Some(pck) = jitter_buffer.front() {
-                let now = now_us();
-                if start_time == 0 {
-                    start_time = now;
+        // 4. 主逻辑循环
+        // 使用 loop + select，当 cancel 触发时直接 break
+        let mut udp_buf = vec![0u8; 4096];
+        loop {
+            tokio::select! {
+                // 优先级 1: 外部取消
+                _ = cancel.cancelled() => {
+                    break;
                 }
 
-                let target_client_time = start_time + (pck.seq as u128) * frame_duration_us;
-
-                if now >= target_client_time {
-                    let packet = jitter_buffer.pop_front().unwrap();
-                    let samples = codec.decode(&packet.data, &mut pcm_buf)?;
-                    player.write(&pcm_buf[..samples * config.channels as usize])?;
-                } else if target_client_time - now > 500_000 {
-                    // Too far in the future, maybe clock jumped?
-                    jitter_buffer.pop_front();
-                } else {
-                    // Wait until it's time
-                    let wait = (target_client_time - now) as u64;
-                    if wait > 1000 {
-                        tokio::time::sleep(Duration::from_micros(wait)).await;
+                // 优先级 2: 网络接收
+                result = socket.recv(&mut udp_buf) => {
+                    if let Ok((packet,_)) = result {
+                        let arrival_time = clock.lock().to_server_time(now_us());
+                        jitter_buffer.push(packet, arrival_time);
                     }
                 }
-            } else {
-                tokio::time::sleep(Duration::from_millis(5)).await;
+
+                // 优先级 3: 播放调度
+                _ = ticker.tick() => {
+                    let current_time = clock.lock().to_server_time(now_us());
+                    while let Some(packet) = jitter_buffer.pop(current_time) {
+                        if let Ok(samples) = codec.decode(&packet.data, &mut pcm_frame) {
+                            let samples = pcm_frame[..samples * config.channels as usize].to_vec();
+                            if pcm_tx.try_send(samples).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
             }
         }
 

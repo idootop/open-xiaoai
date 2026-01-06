@@ -279,6 +279,7 @@ impl Client {
                 println!("[Client] Starting playback...");
                 let handle = PlaybackPipeline::spawn(
                     config,
+                    session.clock.clone(),
                     session.audio_socket.clone(),
                     session.cancel.clone(),
                 );
