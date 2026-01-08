@@ -847,6 +847,7 @@ dependencies = [
  "postcard",
  "serde",
  "symphonia",
+ "thiserror",
  "tokio",
  "tokio-util",
 ]

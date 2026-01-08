@@ -10,6 +10,7 @@ use std::sync::Arc;
 use xiao::app::client::{Client, ClientConfig};
 use xiao::net::command::Command;
 use xiao::net::event::EventData;
+use xiao::net::rpc::RpcBuilder;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -61,22 +62,20 @@ async fn main() -> anyhow::Result<()> {
     println!("Connected to server!");
     println!("Running client-side tests...\n");
 
-    // 1. 测试向服务器发送 Ping
-    println!("1️⃣  Testing Ping to server...");
-    match client.execute(Command::ping()).await {
-        Ok(result) => println!("   ✅ Pong received: {:?}", result),
-        Err(e) => println!("   ❌ Ping failed: {}", e),
+    // 1. 测试简单的 Shell 命令
+    println!("1️⃣  Testing Shell command...");
+    match client
+        .rpc(&RpcBuilder::default(Command::Shell(
+            "echo 'Hello from client'".to_string(),
+        )))
+        .await
+    {
+        Ok(resp) => println!("   ✅ Command executed: {:?}", resp),
+        Err(e) => println!("   ❌ Command failed: {}", e),
     }
 
-    // 2. 测试获取服务器信息
-    println!("\n2️⃣  Testing GetInfo from server...");
-    match client.execute(Command::GetInfo).await {
-        Ok(result) => println!("   ✅ Server info: {:?}", result),
-        Err(e) => println!("   ❌ GetInfo failed: {}", e),
-    }
-
-    // 3. 发送客户端事件
-    println!("\n3️⃣  Sending event to server...");
+    // 2. 发送客户端事件
+    println!("\n2️⃣  Sending event to server...");
     match client
         .send_event(EventData::Hello {
             message: "from client!".to_string(),

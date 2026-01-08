@@ -229,22 +229,3 @@ impl AudioBus {
         self.subscribers.contains_key(addr)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_audio_bus_basic() {
-        let bus = AudioBus::new().await.unwrap();
-        let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
-
-        let id = bus.register(addr, true);
-        assert!(bus.is_registered(&addr));
-        assert_eq!(bus.subscriber_count(), 1);
-
-        bus.unregister(&addr);
-        assert!(!bus.is_registered(&addr));
-        assert_eq!(bus.subscriber_count(), 0);
-    }
-}

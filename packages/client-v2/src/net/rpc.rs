@@ -4,138 +4,226 @@
 //! - 请求 ID 生成
 //! - 请求/响应匹配
 //! - 超时处理
+//! - 异步任务管理
 
-use crate::net::command::CommandResult;
-use parking_lot::Mutex;
-use std::collections::HashMap;
+use crate::net::command::{Command, CommandError, CommandResult};
+use crate::net::protocol::ControlPacket;
+use crate::utils::shell::Shell;
+use anyhow::Result;
+use dashmap::DashMap;
+use std::future::Future;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
+use thiserror::Error;
 use tokio::sync::oneshot;
 
-/// RPC 调用错误
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum RpcError {
-    /// 超时
+    #[error("RPC timeout")]
     Timeout,
-    /// 通道关闭
+    #[error("RPC cancelled")]
     Cancelled,
-    /// 未连接
-    NotConnected,
+    #[error("RPC internal error: {0}")]
+    Internal(String),
 }
 
-impl std::fmt::Display for RpcError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RpcError::Timeout => write!(f, "RPC timeout"),
-            RpcError::Cancelled => write!(f, "RPC cancelled"),
-            RpcError::NotConnected => write!(f, "Not connected"),
-        }
-    }
-}
-
-impl std::error::Error for RpcError {}
-
-/// 等待中的 RPC 请求
-struct PendingRequest {
-    tx: oneshot::Sender<CommandResult>,
-    created_at: std::time::Instant,
-}
-
-/// RPC 管理器
 pub struct RpcManager {
+    handler: RpcHandler,
     next_id: AtomicU32,
-    pending: Mutex<HashMap<u32, PendingRequest>>,
-    default_timeout: Duration,
+    pending: Arc<DashMap<u32, oneshot::Sender<CommandResult>>>,
 }
 
 impl RpcManager {
-    /// 创建新的 RPC 管理器
     pub fn new() -> Self {
-        Self::with_timeout(Duration::from_secs(30))
-    }
-
-    /// 创建带自定义超时的 RPC 管理器
-    pub fn with_timeout(timeout: Duration) -> Self {
         Self {
+            handler: RpcHandler::new(),
             next_id: AtomicU32::new(1),
-            pending: Mutex::new(HashMap::new()),
-            default_timeout: timeout,
+            pending: Arc::new(DashMap::new()),
         }
     }
 
-    /// 注册一个新的 RPC 请求
-    ///
-    /// 返回 (请求ID, 响应接收器)
-    pub fn register(&self) -> (u32, oneshot::Receiver<CommandResult>) {
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let (tx, rx) = oneshot::channel();
-        self.pending.lock().insert(
-            id,
-            PendingRequest {
-                tx,
-                created_at: std::time::Instant::now(),
-            },
-        );
-        (id, rx)
-    }
-
-    /// 解析 RPC 响应
     pub fn resolve(&self, id: u32, result: CommandResult) {
-        if let Some(req) = self.pending.lock().remove(&id) {
-            let _ = req.tx.send(result);
+        if let Some((_, tx)) = self.pending.remove(&id) {
+            let _ = tx.send(result);
         }
     }
 
-    /// 取消指定的 RPC 请求
     pub fn cancel(&self, id: u32) {
-        self.pending.lock().remove(&id);
+        self.pending.remove(&id);
     }
 
-    /// 获取待处理请求数量
-    pub fn pending_count(&self) -> usize {
-        self.pending.lock().len()
+    /// 发起异步 RPC 调用
+    ///
+    /// F: 异步闭包，输入 ID，返回 Future
+    pub async fn call<F, Fut>(
+        &self,
+        builder: &RpcBuilder,
+        send_fn: F,
+    ) -> Result<CommandResult, RpcError>
+    where
+        F: FnOnce(ControlPacket) -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
+        let command = builder.command.clone();
+        let timeout = builder.timeout;
+        let run_async = builder.run_async;
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = oneshot::channel();
+
+        // 1. 注册请求
+        self.pending.insert(id, tx);
+
+        // 2. RAII 守卫：确保无论因超时、报错还是外部 Drop，ID 都会被清理
+        let _guard = DropGuard {
+            id,
+            pending: Arc::clone(&self.pending),
+        };
+
+        // 3. 执行异步发送逻辑
+        if let Err(e) = send_fn(ControlPacket::RpcRequest {
+            id,
+            command,
+            timeout,
+            run_async,
+        })
+        .await
+        {
+            return Err(RpcError::Internal(e.to_string()));
+        }
+
+        // 4. 等待响应或超时
+        match timeout {
+            Some(ms) => match tokio::time::timeout(Duration::from_millis(ms), rx).await {
+                Ok(Ok(res)) => Ok(res),
+                Ok(Err(_)) => Err(RpcError::Cancelled), // tx 关闭，任务被取消
+                Err(_) => Err(RpcError::Timeout),
+            },
+            None => rx.await.map_err(|_| RpcError::Cancelled), // tx 关闭，任务被取消
+        }
     }
 
-    /// 清理超时的请求
-    pub fn cleanup_expired(&self) {
-        let mut pending = self.pending.lock();
-        let now = std::time::Instant::now();
+    /// 处理 RPC 调用
+    ///
+    /// F: 异步闭包，输入 ID，返回 Future
+    pub async fn handle_rpc_request<F, Fut>(
+        &self,
+        id: u32,
+        run_async: bool,
+        timeout_ms: Option<u64>,
+        command: Command,
+        send_fn: F,
+    ) -> Result<()>
+    where
+        F: Fn(ControlPacket) -> Fut + Send + Sync + 'static, // 异步执行需要 'static
+        Fut: Future<Output = Result<()>> + Send,
+    {
+        let sender = Arc::new(send_fn);
+        let handler = self.handler.clone();
 
-        pending.retain(|_, req| {
-            if now.duration_since(req.created_at) > self.default_timeout {
-                false
-            } else {
-                true
+        let task = async move {
+            let execute_future = handler.handle(command, timeout_ms);
+
+            match timeout_ms {
+                None => {
+                    // 无超时逻辑
+                    let result = execute_future.await;
+                    sender(ControlPacket::RpcResponse { id, result }).await
+                }
+                Some(ms) => {
+                    let d = Duration::from_millis(ms);
+                    match tokio::time::timeout(d, execute_future).await {
+                        Ok(result) => {
+                            // 1. 正常完成
+                            sender(ControlPacket::RpcResponse { id, result }).await
+                        }
+                        Err(_) => {
+                            // 2. 触发超时：发送超时错误消息
+                            let err_result = CommandResult::error(CommandError::timeout(format!(
+                                "Task {} timed out after {}ms",
+                                id, ms
+                            )));
+                            sender(ControlPacket::RpcResponse {
+                                id,
+                                result: err_result,
+                            })
+                            .await
+                        }
+                    }
+                }
             }
-        });
-    }
+        };
 
-    /// 获取默认超时时间
-    pub fn default_timeout(&self) -> Duration {
-        self.default_timeout
-    }
-}
-
-impl Default for RpcManager {
-    fn default() -> Self {
-        Self::new()
+        if run_async {
+            tokio::spawn(task);
+            Ok(())
+        } else {
+            task.await
+        }
     }
 }
 
-/// RPC 调用辅助函数
-pub async fn call_with_timeout<F, Fut>(
-    timeout: Duration,
-    register_fn: F,
-) -> Result<CommandResult, RpcError>
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = Result<oneshot::Receiver<CommandResult>, RpcError>>,
-{
-    let rx = register_fn().await?;
+#[derive(Debug, Clone)]
+pub struct RpcBuilder {
+    pub command: Command,
+    pub run_async: bool,
+    pub timeout: Option<u64>,
+}
 
-    match tokio::time::timeout(timeout, rx).await {
-        Ok(Ok(result)) => Ok(result),
-        Ok(Err(_)) => Err(RpcError::Cancelled),
-        Err(_) => Err(RpcError::Timeout),
+impl RpcBuilder {
+    /// 基础构造器
+    pub fn new(command: Command) -> Self {
+        Self {
+            command,
+            run_async: false,
+            timeout: None,
+        }
+    }
+
+    /// 便捷方法：默认异步配置
+    pub fn default(command: Command) -> Self {
+        Self::new(command).set_async(true).set_timeout(10_000)
+    }
+
+    /// 设置为异步运行
+    pub fn set_async(mut self, is_async: bool) -> Self {
+        self.run_async = is_async;
+        self
+    }
+
+    /// 设置超时时长（毫秒）
+    pub fn set_timeout(mut self, ms: u64) -> Self {
+        self.timeout = Some(ms);
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RpcHandler;
+
+impl RpcHandler {
+    fn new() -> Self {
+        Self {}
+    }
+
+    async fn handle(&self, command: Command, timeout_ms: Option<u64>) -> CommandResult {
+        match command {
+            Command::Shell(req) => match Shell::run(req, timeout_ms).await {
+                Ok(resp) => CommandResult::Shell(resp),
+                Err(e) => CommandResult::Error(CommandError::internal(e.to_string())),
+            },
+            _ => CommandResult::Error(CommandError::not_implemented()),
+        }
+    }
+}
+
+struct DropGuard {
+    id: u32,
+    pending: Arc<DashMap<u32, oneshot::Sender<CommandResult>>>,
+}
+
+impl Drop for DropGuard {
+    fn drop(&mut self) {
+        self.pending.remove(&self.id);
     }
 }

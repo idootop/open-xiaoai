@@ -8,10 +8,10 @@
 //! 音频流的实际处理由 AudioBus 和 Stream 模块负责。
 
 use crate::audio::config::AudioConfig;
-use crate::net::command::{Command, CommandResult};
+use crate::net::command::CommandResult;
 use crate::net::network::Connection;
 use crate::net::protocol::{ClientInfo, ControlPacket};
-use crate::net::rpc::RpcManager;
+use crate::net::rpc::{RpcBuilder, RpcManager};
 use anyhow::{Context, Result};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -98,7 +98,7 @@ pub struct Session {
     pub conn: Arc<Connection>,
 
     /// RPC 管理器
-    pub rpc: Arc<RpcManager>,
+    pub rpc_manager: Arc<RpcManager>,
 
     /// TCP 地址（用作会话 ID）
     pub tcp_addr: SocketAddr,
@@ -131,7 +131,7 @@ impl Session {
         Self {
             info,
             conn,
-            rpc: Arc::new(RpcManager::new()),
+            rpc_manager: Arc::new(RpcManager::new()),
             tcp_addr,
             audio_addr,
             cancel,
@@ -166,18 +166,20 @@ impl Session {
         self.conn.recv().await
     }
 
-    /// 执行 RPC 调用（新版，使用 Command）
-    pub async fn execute(&self, command: Command) -> Result<CommandResult> {
-        let (id, rx) = self.rpc.register();
-        self.conn
-            .send(&ControlPacket::RpcRequest { id, command })
+    /// 发起 RPC 调用（支持超时和异步控制）
+    pub async fn rpc(&self, request: &RpcBuilder) -> Result<CommandResult> {
+        let result = self
+            .rpc_manager
+            .call(request, |pck| async move {
+                return self.conn.send(&pck).await;
+            })
             .await?;
-        rx.await.context("RPC channel closed")
+        Ok(result)
     }
 
     /// 处理 RPC 响应
     pub fn resolve_rpc(&self, id: u32, result: CommandResult) {
-        self.rpc.resolve(id, result);
+        self.rpc_manager.resolve(id, result);
     }
 
     /// 开始录音流

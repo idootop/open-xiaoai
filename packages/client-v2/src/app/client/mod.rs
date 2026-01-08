@@ -31,14 +31,12 @@ mod session;
 pub use pipeline::{PipelineHandle, PlaybackPipeline, RecordPipeline};
 pub use session::Session;
 
-use crate::net::command::{
-    AudioState, Command, CommandError, CommandResult, DeviceInfo, SetVolumeResponse, ShellRequest,
-    ShellResponse,
-};
+use crate::net::command::CommandResult;
 use crate::net::discovery::Discovery;
 use crate::net::event::{EventBus, EventBusSubscription, EventData};
 use crate::net::network::{AudioSocket, Connection};
 use crate::net::protocol::ControlPacket;
+use crate::net::rpc::RpcBuilder;
 use crate::net::sync::now_us;
 use anyhow::{Result, anyhow};
 use session::handshake;
@@ -254,11 +252,22 @@ impl Client {
             ControlPacket::RpcResponse { id, result } => {
                 session.resolve_rpc(id, result);
             }
-            // todo 耗时任务，异步响应
-            ControlPacket::RpcRequest { id, command } => {
-                let result = self.handle_command(session, command).await;
+            // 处理 RPC 请求（支持超时和异步控制）
+            ControlPacket::RpcRequest {
+                id,
+                run_async,
+                timeout,
+                command,
+            } => {
+                let session_clone = session.clone();
                 session
-                    .send(&ControlPacket::RpcResponse { id, result })
+                    .rpc_manager
+                    .handle_rpc_request(id, run_async, timeout, command, move |pck| {
+                        let s = session_clone.clone();
+                        async move {
+                            return s.send(&pck).await;
+                        }
+                    })
                     .await?;
             }
             ControlPacket::StartRecording { config } => {
@@ -294,72 +303,6 @@ impl Client {
         Ok(())
     }
 
-    /// 处理 RPC 命令
-    async fn handle_command(&self, session: &Arc<Session>, command: Command) -> CommandResult {
-        match command {
-            Command::Shell(req) => self.handle_shell(req),
-            Command::GetInfo => self.handle_get_info(session),
-            Command::Ping { timestamp } => {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64;
-                CommandResult::Pong {
-                    timestamp,
-                    server_time: now,
-                }
-            }
-            Command::SetVolume(req) => {
-                let prev = session.set_volume(req.volume);
-                CommandResult::Volume(SetVolumeResponse {
-                    previous: prev,
-                    current: session.volume(),
-                })
-            }
-            _ => CommandResult::Error(CommandError::not_implemented()),
-        }
-    }
-
-    /// 处理 Shell 命令
-    fn handle_shell(&self, req: ShellRequest) -> CommandResult {
-        let mut cmd = std::process::Command::new("sh");
-        cmd.arg("-c").arg(&req.command);
-
-        if let Some(cwd) = &req.cwd {
-            cmd.current_dir(cwd);
-        }
-
-        if let Some(env) = &req.env {
-            for (k, v) in env {
-                cmd.env(k, v);
-            }
-        }
-
-        match cmd.output() {
-            Ok(output) => CommandResult::Shell(ShellResponse {
-                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-                exit_code: output.status.code().unwrap_or(-1),
-            }),
-            Err(e) => CommandResult::Error(CommandError::internal(e.to_string())),
-        }
-    }
-
-    /// 处理获取设备信息
-    fn handle_get_info(&self, session: &Arc<Session>) -> CommandResult {
-        CommandResult::Info(DeviceInfo {
-            model: self.config.model.clone(),
-            serial_number: self.config.serial_number.clone(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            uptime_secs: session.uptime_secs(),
-            audio_state: AudioState {
-                is_recording: session.is_recording(),
-                is_playing: session.is_playing(),
-                volume: session.volume(),
-            },
-        })
-    }
-
     /// 清理资源
     async fn cleanup(&self) {
         let mut session_guard = self.session.write().await;
@@ -372,22 +315,12 @@ impl Client {
     // ==================== 公开 API ====================
 
     /// 执行 RPC 命令
-    pub async fn execute(&self, command: Command) -> Result<CommandResult> {
+    pub async fn rpc(&self, builder: &RpcBuilder) -> Result<CommandResult> {
         let session_guard = self.session.read().await;
         if let Some(session) = session_guard.as_ref() {
-            session.execute(command).await
+            session.rpc(builder).await
         } else {
             Err(anyhow!("Not connected"))
-        }
-    }
-
-    /// 执行 Shell 命令
-    pub async fn shell(&self, cmd: &str) -> Result<ShellResponse> {
-        let result = self.execute(Command::shell(cmd)).await?;
-        match result {
-            CommandResult::Shell(resp) => Ok(resp),
-            CommandResult::Error(e) => Err(anyhow!("{}", e)),
-            _ => Err(anyhow!("Unexpected response type")),
         }
     }
 

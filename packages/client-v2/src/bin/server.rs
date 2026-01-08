@@ -11,6 +11,7 @@ use xiao::app::server::{Server, ServerConfig};
 use xiao::audio::config::AudioConfig;
 use xiao::net::command::Command;
 use xiao::net::event::EventData;
+use xiao::net::rpc::RpcBuilder;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -65,32 +66,34 @@ async fn main() -> anyhow::Result<()> {
         println!("Client connected: {}", addr);
         println!("Running demo tests...\n");
 
-        // 1. 测试 Ping
-        println!("1️⃣  Testing Ping...");
-        match server.execute(addr, Command::ping()).await {
-            Ok(result) => println!("   ✅ Ping result: {:?}", result),
-            Err(e) => println!("   ❌ Ping failed: {}", e),
+        // 1. 测试 Shell 命令（同步）
+        println!("1️⃣  Testing Shell RPC (sync)...");
+        match server
+            .rpc(
+                addr,
+                &RpcBuilder::default(Command::Shell("echo 'Hello from server'".to_string())),
+            )
+            .await
+        {
+            Ok(resp) => println!("   ✅ Command executed: {:?}", resp),
+            Err(e) => println!("   ❌ Command failed: {}", e),
         }
 
-        // 2. 测试获取设备信息
-        println!("\n2️⃣  Testing GetInfo...");
-        match server.execute(addr, Command::GetInfo).await {
-            Ok(result) => println!("   ✅ Device info: {:?}", result),
-            Err(e) => println!("   ❌ GetInfo failed: {}", e),
+        // 2. 测试 Shell 命令（带超时）
+        println!("\n2️⃣  Testing Shell RPC with timeout (1s)...");
+        match server
+            .rpc(
+                addr,
+                &RpcBuilder::default(Command::Shell("sleep 2".to_string())).set_timeout(1000),
+            )
+            .await
+        {
+            Ok(resp) => println!("   ✅ Command executed: {:?}", resp),
+            Err(e) => println!("   ❌ Command failed: {}", e),
         }
 
-        // 3. 测试 Shell 命令
-        println!("\n3️⃣  Testing Shell RPC...");
-        match server.shell(addr, "echo 'Hello from XiaoAi!'").await {
-            Ok(resp) => {
-                println!("   ✅ stdout: {}", resp.stdout.trim());
-                println!("   ✅ exit_code: {}", resp.exit_code);
-            }
-            Err(e) => println!("   ❌ Shell failed: {}", e),
-        }
-
-        // 4. 测试事件
-        println!("\n4️⃣  Broadcasting notification event...");
+        // 3. 测试事件
+        println!("\n3️⃣  Broadcasting notification event...");
         match server
             .send_event(
                 addr,

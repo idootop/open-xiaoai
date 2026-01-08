@@ -44,13 +44,12 @@ pub use stream::{FilePlaybackStream, RecorderStream, StreamHandle};
 
 use crate::audio::config::AudioConfig;
 use crate::audio::wav::WavReader;
-use crate::net::command::{
-    AudioState, Command, CommandError, CommandResult, DeviceInfo, ShellResponse,
-};
+use crate::net::command::CommandResult;
 use crate::net::discovery::Discovery;
 use crate::net::event::{EventBus, EventBusSubscription, EventData};
 use crate::net::network::Connection;
 use crate::net::protocol::ControlPacket;
+use crate::net::rpc::RpcBuilder;
 use crate::net::sync::now_us;
 use anyhow::{Context, Result, anyhow};
 use std::net::SocketAddr;
@@ -289,62 +288,26 @@ impl Server {
             ControlPacket::RpcResponse { id, result } => {
                 session.resolve_rpc(id, result);
             }
-            // todo 耗时任务，异步响应
-            ControlPacket::RpcRequest { id, command } => {
-                let result = self.handle_command(session, command).await;
+            ControlPacket::RpcRequest {
+                id,
+                run_async,
+                timeout,
+                command,
+            } => {
+                let session_clone = session.clone();
                 session
-                    .send(&ControlPacket::RpcResponse { id, result })
+                    .rpc_manager
+                    .handle_rpc_request(id, run_async, timeout, command, move |pck| {
+                        let s = session_clone.clone();
+                        async move {
+                            return s.send(&pck).await;
+                        }
+                    })
                     .await?;
             }
-
             _ => {}
         }
         Ok(())
-    }
-
-    /// 处理 RPC 命令
-    async fn handle_command(&self, session: &Arc<Session>, command: Command) -> CommandResult {
-        match command {
-            Command::Shell(req) => {
-                // 转发给客户端执行
-                match session.execute(Command::Shell(req)).await {
-                    Ok(result) => result,
-                    Err(e) => CommandResult::Error(CommandError::internal(e.to_string())),
-                }
-            }
-            Command::GetInfo => {
-                // 返回服务器信息
-                CommandResult::Info(DeviceInfo {
-                    model: "XiaoAi-Server".to_string(),
-                    serial_number: "SERVER-001".to_string(),
-                    version: env!("CARGO_PKG_VERSION").to_string(),
-                    uptime_secs: self.started_at.elapsed().as_secs(),
-                    audio_state: AudioState {
-                        is_recording: session.is_recording(),
-                        is_playing: session.is_playing(),
-                        volume: 100,
-                    },
-                })
-            }
-            Command::Ping { timestamp } => {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64;
-                CommandResult::Pong {
-                    timestamp,
-                    server_time: now,
-                }
-            }
-            Command::SetVolume(_) => {
-                // 转发给客户端
-                match session.execute(command).await {
-                    Ok(result) => result,
-                    Err(e) => CommandResult::Error(CommandError::internal(e.to_string())),
-                }
-            }
-            _ => CommandResult::Error(CommandError::not_implemented()),
-        }
     }
 
     // ==================== 公开 API ====================
@@ -364,20 +327,10 @@ impl Server {
         self.started_at.elapsed().as_secs()
     }
 
-    /// 向客户端发起 RPC 调用（新版）
-    pub async fn execute(&self, addr: SocketAddr, command: Command) -> Result<CommandResult> {
+    /// 向客户端发起 RPC
+    pub async fn rpc(&self, addr: SocketAddr, builder: &RpcBuilder) -> Result<CommandResult> {
         let session = self.sessions.get(&addr).context("Session not found")?;
-        session.execute(command).await
-    }
-
-    /// 执行 Shell 命令
-    pub async fn shell(&self, addr: SocketAddr, cmd: &str) -> Result<ShellResponse> {
-        let result = self.execute(addr, Command::shell(cmd)).await?;
-        match result {
-            CommandResult::Shell(resp) => Ok(resp),
-            CommandResult::Error(e) => Err(anyhow!("{}", e)),
-            _ => Err(anyhow!("Unexpected response type")),
-        }
+        session.rpc(builder).await
     }
 
     /// 发送事件

@@ -6,10 +6,10 @@
 //! - 会话生命周期
 //! - 活动音频流追踪
 
-use crate::net::command::{Command, CommandResult};
+use crate::net::command::CommandResult;
 use crate::net::network::{AudioSocket, Connection};
 use crate::net::protocol::{ClientInfo, ControlPacket};
-use crate::net::rpc::RpcManager;
+use crate::net::rpc::{RpcBuilder, RpcManager};
 use crate::net::sync::ClockSync;
 use anyhow::{Context, Result, anyhow};
 use std::net::SocketAddr;
@@ -90,7 +90,7 @@ pub struct Session {
     pub server_audio_addr: SocketAddr,
 
     /// RPC 管理器
-    pub rpc: Arc<RpcManager>,
+    pub rpc_manager: Arc<RpcManager>,
 
     /// 会话取消令牌
     pub cancel: CancellationToken,
@@ -120,7 +120,7 @@ impl Session {
             conn,
             audio_socket,
             server_audio_addr,
-            rpc: Arc::new(RpcManager::new()),
+            rpc_manager: Arc::new(RpcManager::new()),
             cancel,
             clock: Arc::new(parking_lot::Mutex::new(ClockSync::new(100))),
             pipelines: parking_lot::Mutex::new(ActivePipelines::default()),
@@ -161,18 +161,20 @@ impl Session {
             .update(client_send_ts, server_ts, client_recv_ts);
     }
 
-    /// 发起 RPC 调用（新版）
-    pub async fn execute(&self, command: Command) -> Result<CommandResult> {
-        let (id, rx) = self.rpc.register();
-        self.conn
-            .send(&ControlPacket::RpcRequest { id, command })
+    /// 发起 RPC 调用（支持超时和异步控制）
+    pub async fn rpc(&self, request: &RpcBuilder) -> Result<CommandResult> {
+        let result = self
+            .rpc_manager
+            .call(request, |pck| async move {
+                return self.conn.send(&pck).await;
+            })
             .await?;
-        rx.await.context("RPC channel closed")
+        Ok(result)
     }
 
     /// 处理 RPC 响应
     pub fn resolve_rpc(&self, id: u32, result: CommandResult) {
-        self.rpc.resolve(id, result);
+        self.rpc_manager.resolve(id, result);
     }
 
     /// 开始录音管道

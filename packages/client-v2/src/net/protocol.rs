@@ -65,6 +65,11 @@ pub enum ControlPacket {
     // ========== RPC ==========
     RpcRequest {
         id: u32,
+        /// 是否异步运行
+        run_async: bool,
+        /// 超时（毫秒）
+        timeout: Option<u64>,
+        /// 请求命令
         command: Command,
     },
     RpcResponse {
