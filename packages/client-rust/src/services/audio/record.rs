@@ -76,8 +76,7 @@ impl AudioRecorder {
         }
 
         let requested_config = config.unwrap_or_else(|| (*AUDIO_CONFIG).clone());
-        let fix_enabled = is_default_noop_recording(&requested_config);
-        let capture_config = capture_config_for_transform(&requested_config, fix_enabled);
+        let capture_config = capture_config_for_recording(&requested_config);
         let mut arecord_thread = spawn_arecord(&capture_config)?;
 
         let mut stdout = arecord_thread.stdout.take().unwrap();
@@ -99,7 +98,8 @@ impl AudioRecorder {
                         while accumulated_data.len() >= target_size {
                             let data_to_send =
                                 accumulated_data.drain(..target_size).collect::<Vec<u8>>();
-                            let data_to_send = transform_stream_chunk(data_to_send, fix_enabled);
+                            let data_to_send =
+                                transform_stream_chunk(data_to_send, &requested_config);
                             if !data_to_send.is_empty() {
                                 let _ = on_stream(data_to_send).await;
                             }
@@ -120,12 +120,9 @@ impl AudioRecorder {
     }
 }
 
-fn capture_config_for_transform(
-    requested: &AudioConfig,
-    fix_enabled: bool,
-) -> AudioConfig {
+fn capture_config_for_recording(requested: &AudioConfig) -> AudioConfig {
     let mut capture = requested.clone();
-    if fix_enabled {
+    if is_default_noop_recording(requested) {
         capture.bits_per_sample = A113_CAPTURE_BITS_PER_SAMPLE;
     }
     capture
@@ -133,9 +130,9 @@ fn capture_config_for_transform(
 
 fn transform_stream_chunk(
     chunk: Vec<u8>,
-    fix_enabled: bool,
+    requested: &AudioConfig,
 ) -> Vec<u8> {
-    if !fix_enabled {
+    if !is_default_noop_recording(requested) {
         return chunk;
     }
     convert_a113_s32_to_s16(&chunk)
