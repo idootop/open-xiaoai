@@ -53,8 +53,6 @@ APP_CONFIG = {
         "after_wakeup": after_wakeup,
     },
     "vad": {
-        # 录音音量增强倍数（小爱音箱录音音量较小，需要后期放大一下）
-        "boost": 10,
         # 语音检测阈值（0-1，越小越灵敏）
         "threshold": 0.10,
         # 最小语音时长（ms）

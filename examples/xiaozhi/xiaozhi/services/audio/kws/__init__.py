@@ -3,6 +3,8 @@ import os
 import threading
 import time
 
+import numpy as np
+
 from config import APP_CONFIG
 from xiaozhi.event import EventManager
 from xiaozhi.ref import get_speaker, get_xiaoai, get_xiaozhi, set_kws
@@ -11,9 +13,13 @@ from xiaozhi.services.audio.stream import MyAudio
 from xiaozhi.services.protocols.typing import AudioConfig, DeviceState
 from xiaozhi.utils.base import get_env
 
+KWS_MIN_RMS = 300.0
+KWS_MIN_TRIGGER_INTERVAL_MS = 1500
+
 
 class _KWS:
     def __init__(self):
+        self.last_trigger_ms = 0.0
         set_kws(self)
 
     def start(self):
@@ -45,6 +51,12 @@ class _KWS:
     def resume(self):
         self.paused = False
 
+    def _rms(self, frames: bytes) -> float:
+        samples = np.frombuffer(frames, dtype=np.int16).astype(np.float32)
+        if samples.size == 0:
+            return 0.0
+        return float(np.sqrt(np.mean(samples * samples) + 1e-6))
+
     def _detection_loop(self):
         SherpaOnnx.start()
         self.stream.start_stream()
@@ -65,8 +77,18 @@ class _KWS:
                 time.sleep(0.01)
                 continue
 
+            # 静音门控：低能量帧跳过 KWS 推理
+            if self._rms(frames) < KWS_MIN_RMS:
+                time.sleep(0.005)
+                continue
+
             result = SherpaOnnx.kws(frames)
             if result:
+                # 防抖：限制连续触发频率，降低重复误触发
+                now_ms = time.monotonic() * 1000.0
+                if now_ms - self.last_trigger_ms < KWS_MIN_TRIGGER_INTERVAL_MS:
+                    continue
+                self.last_trigger_ms = now_ms
                 print(f"🔥 触发唤醒: {result}")
                 self.on_message(result)
 

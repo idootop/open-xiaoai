@@ -9,10 +9,10 @@ class _SherpaOnnx:
         self.keyword_spotter = sherpa_onnx.KeywordSpotter(
             provider="cpu",
             num_threads=1,
-            max_active_paths=4,
+            max_active_paths=8,
             keywords_score=2.0,
             keywords_threshold=0.2,
-            num_trailing_blanks=1,
+            num_trailing_blanks=0,
             keywords_file=get_model_file_path("keywords.txt"),
             tokens=get_model_file_path("tokens.txt"),
             encoder=get_model_file_path("encoder.onnx"),
