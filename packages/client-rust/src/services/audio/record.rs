@@ -76,22 +76,9 @@ impl AudioRecorder {
         }
 
         let requested_config = config.unwrap_or_else(|| (*AUDIO_CONFIG).clone());
-        let mut fix_enabled = should_enable_a113_fix(&requested_config).await;
-        let mut capture_config = capture_config_for_transform(&requested_config, fix_enabled);
-
-        let mut arecord_thread = match spawn_arecord(&capture_config) {
-            Ok(child) => child,
-            Err(err) => {
-                // Keep backward compatibility if S32 capture isn't supported.
-                if fix_enabled {
-                    fix_enabled = false;
-                    capture_config = requested_config.clone();
-                    spawn_arecord(&capture_config)?
-                } else {
-                    return Err(err);
-                }
-            }
-        };
+        let fix_enabled = is_default_noop_recording(&requested_config);
+        let capture_config = capture_config_for_transform(&requested_config, fix_enabled);
+        let mut arecord_thread = spawn_arecord(&capture_config)?;
 
         let mut stdout = arecord_thread.stdout.take().unwrap();
         let read_thread = tokio::spawn(async move {
@@ -177,28 +164,6 @@ fn convert_a113_s32_to_s16(chunk: &[u8]) -> Vec<u8> {
     }
 
     out
-}
-
-async fn should_enable_a113_fix(config: &AudioConfig) -> bool {
-    if !is_default_noop_recording(config) {
-        return false;
-    }
-    detect_a113_platform().await
-}
-
-async fn detect_a113_platform() -> bool {
-    let out = match Command::new("sh")
-        .arg("-c")
-        .arg("cat /proc/device-tree/compatible 2>/dev/null; cat /proc/cpuinfo 2>/dev/null")
-        .output()
-        .await
-    {
-        Ok(out) => out,
-        Err(_) => return false,
-    };
-
-    let probe = String::from_utf8_lossy(&out.stdout).to_lowercase();
-    probe.contains("a113") || (probe.contains("amlogic") && probe.contains("meson"))
 }
 
 fn spawn_arecord(config: &AudioConfig) -> Result<Child, AppError> {
