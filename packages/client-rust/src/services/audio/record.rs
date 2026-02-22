@@ -18,10 +18,6 @@ enum State {
 
 const A113_CAPTURE_BITS_PER_SAMPLE: u16 = 32;
 
-fn is_default_noop_recording(config: &AudioConfig) -> bool {
-    config.pcm == "noop" && config.channels == 1 && config.bits_per_sample == 16
-}
-
 pub struct AudioRecorder {
     state: Arc<Mutex<State>>,
     arecord_thread: Arc<Mutex<Option<Child>>>,
@@ -99,7 +95,7 @@ impl AudioRecorder {
                             let data_to_send =
                                 accumulated_data.drain(..target_size).collect::<Vec<u8>>();
                             let data_to_send =
-                                transform_stream_chunk(data_to_send, &requested_config);
+                                transform_stream_chunk(data_to_send, &requested_config, &capture_config);
                             if !data_to_send.is_empty() {
                                 let _ = on_stream(data_to_send).await;
                             }
@@ -122,7 +118,7 @@ impl AudioRecorder {
 
 fn capture_config_for_recording(requested: &AudioConfig) -> AudioConfig {
     let mut capture = requested.clone();
-    if is_default_noop_recording(requested) {
+    if requested.bits_per_sample == 16 {
         capture.bits_per_sample = A113_CAPTURE_BITS_PER_SAMPLE;
     }
     capture
@@ -131,8 +127,9 @@ fn capture_config_for_recording(requested: &AudioConfig) -> AudioConfig {
 fn transform_stream_chunk(
     chunk: Vec<u8>,
     requested: &AudioConfig,
+    capture: &AudioConfig,
 ) -> Vec<u8> {
-    if !is_default_noop_recording(requested) {
+    if requested.bits_per_sample != 16 || capture.bits_per_sample != A113_CAPTURE_BITS_PER_SAMPLE {
         return chunk;
     }
     convert_a113_s32_to_s16(&chunk)
