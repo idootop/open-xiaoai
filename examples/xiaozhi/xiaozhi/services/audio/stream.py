@@ -1,9 +1,6 @@
 import uuid
 from typing import Any, Callable, ClassVar, Optional
 
-import numpy as np
-
-from config import APP_CONFIG
 from xiaozhi.ref import get_xiaoai
 
 
@@ -88,10 +85,7 @@ class MyStream:
             return
 
         if len(data) > 0:
-            samples = np.frombuffer(data, dtype=np.int16)
-            # 小爱音箱录音音量较小，需要后期放大一下
-            samples = samples * APP_CONFIG["vad"]["boost"]
-            self.input_bytes.extend(samples.tobytes())
+            self.input_bytes.extend(data)
 
     def read(self, num_frames=None, exception_on_overflow=False) -> bytes:
         if num_frames is None:
