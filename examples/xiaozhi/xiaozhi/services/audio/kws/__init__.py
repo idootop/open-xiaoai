@@ -50,7 +50,9 @@ class _KWS:
         self.stream.start_stream()
         while True:
             # 读取缓冲区音频数据
-            frames = self.stream.read()
+            frames = self.stream.read(
+                AudioConfig.FRAME_SIZE, exception_on_overflow=False
+            )
 
             # 在说话和监听状态时，暂停 KWS
             if (

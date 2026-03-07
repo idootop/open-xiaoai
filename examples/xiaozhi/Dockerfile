@@ -44,14 +44,29 @@ WORKDIR /app
 
 # 更新源
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libopus-dev \
+    curl libopus-dev \
     && rm -rf /var/lib/apt/lists/*
 
+ARG TARGETARCH
 ENV CLI=true
+ENV LD_LIBRARY_PATH=/usr/local/lib:/app/.venv/lib/python3.12/site-packages/onnxruntime/capi
 
 COPY --from=builder /app/.venv /app/.venv
 COPY examples/xiaozhi/main.py . 
 COPY examples/xiaozhi/xiaozhi ./xiaozhi
 
-# 先初始化关键词模型，然后启动主程序
-CMD ["/bin/bash", "-c", "source /app/.venv/bin/activate && python xiaozhi/services/audio/kws/keywords.py && python main.py"]
+RUN set -eux; \
+    case "$TARGETARCH" in \
+      arm64) ort_arch="aarch64" ;; \
+      amd64) ort_arch="x64" ;; \
+      *) echo "Unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    curl -L "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-linux-${ort_arch}-1.23.2.tgz" -o /tmp/onnxruntime.tgz; \
+    tar -xzf /tmp/onnxruntime.tgz -C /tmp; \
+    cp /tmp/onnxruntime-linux-${ort_arch}-1.23.2/lib/libonnxruntime.so.1.23.2 /usr/local/lib/; \
+    ln -sf /usr/local/lib/libonnxruntime.so.1.23.2 /usr/local/lib/libonnxruntime.so; \
+    ldconfig; \
+    rm -rf /tmp/onnxruntime.tgz /tmp/onnxruntime-linux-${ort_arch}-1.23.2
+
+# 镜像已内置可用的 keywords.txt，启动时不再强制重建
+CMD ["/bin/bash", "-c", "source /app/.venv/bin/activate && python main.py"]
